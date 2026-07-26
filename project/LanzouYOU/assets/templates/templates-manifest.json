@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 2,
+  "purpose": "maintainer-precompiled-shell-templates",
+  "generation": {
+    "runId": "736b513829c64e109dec36bb963f7a83",
+    "generatedAt": "2026-07-14T19:34:12.5058748+00:00"
+  },
+  "coreAbi": {
+    "version": 1,
+    "exports": [
+      "lanzouyou_dispatch",
+      "lanzouyou_free"
+    ]
+  },
+  "recipeSchemaVersion": 1,
+  "targets": [
+    "android",
+    "windows"
+  ],
+  "artifacts": [
+    {
+      "target": "android",
+      "file": "lanzou_library_shell_android.apk",
+      "bytes": 56844261,
+      "sha256": "602269b1f174d5e4fecd2a4a4ba2c7c4a64e22941fe055128f0d5e0dbda1aeb2"
+    },
+    {
+      "target": "windows",
+      "file": "lanzou_library_shell_windows.zip",
+      "bytes": 17228547,
+      "sha256": "3311e9938eef32b16927783d5d905a5c9b09a4f76e79ded5c2079547d74f9d45"
+    }
+  ]
+}

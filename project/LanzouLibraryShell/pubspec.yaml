@@ -1,0 +1,29 @@
+name: lanzou_library_shell
+description: "Configurable Lanzou software-library shell for Android and Windows."
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: ^3.12.2
+
+dependencies:
+  ffi: ^2.1.4
+  flutter:
+    sdk: flutter
+  open_filex: ^4.7.0
+  path: ^1.9.1
+  path_provider: ^2.1.5
+  url_launcher: ^6.3.2
+
+dev_dependencies:
+  flutter_lints: ^6.0.0
+  flutter_launcher_icons: ^0.14.4
+  flutter_test:
+    sdk: flutter
+  integration_test:
+    sdk: flutter
+
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/runtime/
