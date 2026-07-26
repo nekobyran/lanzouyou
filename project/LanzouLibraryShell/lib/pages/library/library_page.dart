@@ -16,6 +16,7 @@ import 'library_compact_home.dart';
 import 'library_content.dart';
 import 'library_detail.dart';
 import 'library_navigation.dart';
+import 'library_personal_page.dart';
 import 'library_source_picker.dart';
 
 const _compactBreakpoint = 720.0;
@@ -224,10 +225,12 @@ class _LibraryPageState extends State<LibraryPage> {
         onOpenUrl: (url) => unawaited(widget.linkOpener.open(url)),
       );
     } else if (_compactDestination == _CompactDestination.downloads) {
-      pageKey = 'downloads';
-      page = DownloadsPage(
+      pageKey = 'personal';
+      page = LibraryPersonalPage(
+        config: widget.config,
         controller: _controller,
         searchFocusNode: _downloadSearchFocusNode,
+        onOpenOfficial: _openOfficial,
       );
     } else if (!_compactSourceOpen) {
       pageKey = 'source-overview';
@@ -261,7 +264,7 @@ class _LibraryPageState extends State<LibraryPage> {
   List<_CompactDestination> get _compactDestinations => [
     if (widget.config.home.visible) _CompactDestination.home,
     _CompactDestination.directory,
-    if (widget.config.features.download) _CompactDestination.downloads,
+    _CompactDestination.downloads,
   ];
 
   _CompactDestination get _compactRoot => widget.config.home.visible
@@ -283,14 +286,13 @@ class _LibraryPageState extends State<LibraryPage> {
       const NavigationDestination(
         icon: Icon(Icons.folder_outlined),
         selectedIcon: Icon(Icons.folder_rounded),
-        label: '目录',
+        label: '列表',
       ),
-      if (widget.config.features.download)
-        const NavigationDestination(
-          icon: Icon(Icons.download_outlined),
-          selectedIcon: Icon(Icons.download_rounded),
-          label: '下载',
-        ),
+      const NavigationDestination(
+        icon: Icon(Icons.person_outline),
+        selectedIcon: Icon(Icons.person),
+        label: '个人',
+      ),
     ],
   );
 

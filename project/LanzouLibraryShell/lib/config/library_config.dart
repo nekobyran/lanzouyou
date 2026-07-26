@@ -173,8 +173,9 @@ class LibraryHomeContent {
       splashText: _text(json, 'splashText'),
       carouselImages: rawImages
           .map((value) {
-            if (value is! String)
+            if (value is! String) {
               throw const LibraryConfigException('轮播图片必须是文本地址');
+            }
             return value.trim();
           })
           .toList(growable: false),

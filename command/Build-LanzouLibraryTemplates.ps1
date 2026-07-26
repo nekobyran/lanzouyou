@@ -1045,8 +1045,8 @@ if ($PSCmdlet.ParameterSetName -eq 'ValidateAndroid') {
     exit 0
 }
 
-if ($SkipAndroid -or $SkipWindows) {
-    throw 'Embedded template publication requires both Android and Windows targets.'
+if ($SkipAndroid -and $SkipWindows) {
+    throw 'At least one template target must be rebuilt.'
 }
 foreach ($path in @($shellProject, $coreProject)) {
     if (-not (Test-Path -LiteralPath $path -PathType Container)) {
@@ -1150,7 +1150,9 @@ if ($EnvironmentCheck) {
     exit 0
 }
 
-Invoke-WindowsToolchainPreflight
+if (-not $SkipWindows) {
+    Invoke-WindowsToolchainPreflight
+}
 $runId = [guid]::NewGuid().ToString('N')
 $runStageRoot = Join-Path $stageParent $runId
 $stagedAssets = Join-Path $runStageRoot 'embedded-assets'
@@ -1162,6 +1164,15 @@ $published = $false
 Write-Host "RunId: $runId"
 
 try {
+    if ($SkipAndroid -or $SkipWindows) {
+        [void](Read-LanzouTemplateSet -RootPath $assetDirectory)
+        $preservedTarget = if ($SkipAndroid) { 'android' } else { 'windows' }
+        $preservedName = Get-LanzouTemplateFileName -Target $preservedTarget
+        Copy-Item `
+            -LiteralPath (Join-Path $assetDirectory $preservedName) `
+            -Destination (Join-Path $stagedAssets $preservedName)
+        Write-Host "PreservedTemplate: $preservedTarget (verified current generation)"
+    }
     Push-Location $shellProject
     try {
         Write-Step -Message 'Resolve shell dependencies.'

@@ -176,8 +176,9 @@ void main() {
         find.byKey(const Key('compact-navigation-bar')),
       );
       expect(compactNavigation.destinations, hasLength(3));
-      await tester.tap(find.text('下载'));
+      await tester.tap(find.text('个人'));
       await tester.pumpAndSettle();
+      expect(find.byKey(const Key('library-personal-page')), findsOneWidget);
       expect(find.byKey(const Key('downloads-page')), findsOneWidget);
       expect(find.text(r'~\Downloads'), findsOneWidget);
       expect(find.text(downloads.saveDirectory), findsNothing);
@@ -187,7 +188,7 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.byKey(const Key('compact-home-scroll')), findsOneWidget);
 
-      await tester.tap(find.text('下载'));
+      await tester.tap(find.text('个人'));
       await tester.pumpAndSettle();
       await tester.sendKeyDownEvent(LogicalKeyboardKey.escape);
       await tester.sendKeyUpEvent(LogicalKeyboardKey.escape);

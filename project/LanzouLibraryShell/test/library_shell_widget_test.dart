@@ -41,9 +41,10 @@ void main() {
     final compactNavigation = tester.widget<NavigationBar>(
       find.byKey(const Key('compact-navigation-bar')),
     );
-    expect(compactNavigation.destinations, hasLength(2));
+    expect(compactNavigation.destinations, hasLength(3));
     expect(find.text('首页'), findsOneWidget);
-    expect(find.text('目录'), findsOneWidget);
+    expect(find.text('列表'), findsOneWidget);
+    expect(find.text('个人'), findsOneWidget);
     expect(find.text('下载'), findsNothing);
     expect(find.textContaining('保存路径'), findsNothing);
 
@@ -109,7 +110,7 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.byKey(const Key('compact-home-scroll')), findsOneWidget);
 
-    await tester.tap(find.text('目录'));
+    await tester.tap(find.text('列表'));
     await tester.pumpAndSettle();
     expect(find.byKey(const Key('compact-source-overview')), findsOneWidget);
     expect(
@@ -1053,7 +1054,7 @@ void main() {
         ),
       );
       await tester.pumpAndSettle();
-      await tester.tap(find.text('目录'));
+      await tester.tap(find.text('列表'));
       await tester.pumpAndSettle();
       await tester.tap(find.byTooltip('选择来源'));
       await tester.pumpAndSettle();

@@ -2,8 +2,8 @@
   "schemaVersion": 2,
   "purpose": "maintainer-precompiled-shell-templates",
   "generation": {
-    "runId": "736b513829c64e109dec36bb963f7a83",
-    "generatedAt": "2026-07-14T19:34:12.5058748+00:00"
+    "runId": "eca84b774dc44774becdc6a75091e69a",
+    "generatedAt": "2026-07-26T17:43:55.9283877+00:00"
   },
   "coreAbi": {
     "version": 1,
@@ -21,8 +21,8 @@
     {
       "target": "android",
       "file": "lanzou_library_shell_android.apk",
-      "bytes": 56844261,
-      "sha256": "602269b1f174d5e4fecd2a4a4ba2c7c4a64e22941fe055128f0d5e0dbda1aeb2"
+      "bytes": 60579577,
+      "sha256": "9182fec375de48725bd8c44773104c5218dd68bba405a58f166a9a1948b301ac"
     },
     {
       "target": "windows",
