@@ -166,8 +166,28 @@ class _LibraryWorkspacePageState extends State<LibraryWorkspacePage>
       for (final child in const ['img1', 'txt1', 'rjk', 'url']) {
         await widget.cloudService.createFolder(root.id, child);
       }
-      final share = await widget.cloudService.shareInfo(root);
-      final recipe = LibraryBuildRecipe.fromShareInfo(share);
+      final libraryFolder = await _findFolder(root.id, 'rjk');
+      if (libraryFolder == null) {
+        throw const CloudFailure('create_unconfirmed', '云端未返回 rjk 软件列表目录');
+      }
+      final rootShare = await widget.cloudService.shareInfo(root);
+      final libraryShare = await widget.cloudService.shareInfo(libraryFolder);
+      final baseRecipe = LibraryBuildRecipe.fromShareInfo(libraryShare);
+      final projectId = suggestProjectId(name);
+      final recipe = baseRecipe.copyWith(
+        identity: baseRecipe.identity.copyWith(
+          projectId: projectId,
+          displayName: name,
+          applicationId: suggestApplicationId(projectId),
+          windowsExeName: projectId.replaceAll('_', '-'),
+        ),
+        workspace: LibraryWorkspace(
+          rootFolderId: root.id,
+          rootFolderName: name,
+          rootShareUrl: rootShare.shareUrl,
+        ),
+        sources: [baseRecipe.sources.single.copyWith(title: name)],
+      );
       await _store.save(recipe);
       _reload();
       if (mounted) await _open(recipe);
