@@ -32,6 +32,17 @@ fn test_library_fetch_asset_is_dispatched_and_blocks_invalid_url_before_network(
 }
 
 #[test]
+fn test_library_read_document_is_dispatched_and_blocks_invalid_url_before_network() {
+    let response: Value = serde_json::from_str(&dispatch_json(
+        r#"{"op":"library_read_document","sourceId":"home-document","shareUrl":"http://127.0.0.1/announcement.txt","password":""}"#,
+    ))
+    .unwrap();
+    assert_eq!(response["ok"], false);
+    assert_eq!(response["error"]["code"], "invalid_argument");
+    assert_ne!(response["error"]["code"], "invalid_request");
+}
+
+#[test]
 fn test_operation_controls_have_stable_safe_contract() {
     let started: Value = serde_json::from_str(&dispatch_json(
         r#"{"op":"upload","folderId":"-1","path":"C:/private/not-returned.bin","operationId":"contract-upload-failure"}"#,

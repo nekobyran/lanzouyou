@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../config/library_config.dart';
 import '../pages/library/library_page.dart';
+import '../repositories/library_remote_content_repository.dart';
 import '../services/download_coordinator.dart';
 import '../services/library_core.dart';
 import '../services/link_opener.dart';
@@ -19,6 +20,9 @@ class LibraryShellApp extends StatelessWidget {
       config: config,
       core: core,
       linkOpener: const UrlLauncherLinkOpener(),
+      remoteContent: CachedLibraryRemoteContentRepository.production(
+        core: core,
+      ),
       downloads: config.features.download
           ? DownloadCoordinator.production(core: core)
           : null,
@@ -30,6 +34,8 @@ class LibraryShellApp extends StatelessWidget {
     required LibraryConfig config,
     required LibraryCore core,
     required LinkOpener linkOpener,
+    LibraryRemoteContentRepository remoteContent =
+        const UnavailableLibraryRemoteContentRepository(),
     DownloadCoordinator? downloads,
   }) {
     if (config.features.download && downloads == null) {
@@ -40,6 +46,7 @@ class LibraryShellApp extends StatelessWidget {
       config: config,
       core: core,
       linkOpener: linkOpener,
+      remoteContent: remoteContent,
       downloads: downloads,
     );
   }
@@ -49,12 +56,14 @@ class LibraryShellApp extends StatelessWidget {
     required this.config,
     required this.core,
     required this.linkOpener,
+    required this.remoteContent,
     required this.downloads,
   });
 
   final LibraryConfig config;
   final LibraryCore core;
   final LinkOpener linkOpener;
+  final LibraryRemoteContentRepository remoteContent;
   final DownloadCoordinator? downloads;
 
   @override
@@ -69,6 +78,7 @@ class LibraryShellApp extends StatelessWidget {
         config: config,
         core: core,
         linkOpener: linkOpener,
+        remoteContent: remoteContent,
         downloads: downloads,
       ),
     );

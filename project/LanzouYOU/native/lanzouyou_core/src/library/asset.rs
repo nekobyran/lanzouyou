@@ -18,7 +18,7 @@ use crate::error::{CoreError, CoreResult};
 
 use super::{
     session::ANDROID_USER_AGENT,
-    url::{is_public_ip, reject_explicit_port_reference, safe_asset_url},
+    url::{is_public_ip, reject_explicit_port_reference},
 };
 
 pub(crate) const MAX_ASSET_BYTES: usize = 1024 * 1024;
@@ -103,9 +103,14 @@ fn validate_asset_syntax(value: &str, policy: &AssetPolicy) -> CoreResult<Url> {
     }
     let parsed = match policy {
         AssetPolicy::Production => {
-            let normalized = safe_asset_url(value)
-                .ok_or_else(|| CoreError::invalid("仅允许受信任的 HTTPS 图标地址"))?;
-            Url::parse(&normalized).map_err(|_| CoreError::invalid("图标地址格式无效"))?
+            reject_explicit_port_reference(value)
+                .map_err(|_| CoreError::invalid("图标地址包含显式端口"))?;
+            let parsed =
+                Url::parse(value.trim()).map_err(|_| CoreError::invalid("图标地址格式无效"))?;
+            if parsed.scheme() != "https" || parsed.host_str().is_none() {
+                return Err(CoreError::invalid("图标必须使用 HTTPS 公网地址"));
+            }
+            parsed
         }
         #[cfg(test)]
         AssetPolicy::Test { origin } => {
@@ -315,15 +320,21 @@ mod tests {
             "https://user@image.dmpdmp.com/image/a.png",
             "https://image.dmpdmp.com:443/image/a.png",
             "https://image.dmpdmp.com:444/image/a.png",
-            "https://evil.example/image/a.png",
-            "https://127.0.0.1/image/a.png",
             "https://image.dmpdmp.com/",
-            "https://other.dmpdmp.com/image/a.png",
-            "https://other.bakstotre.com/assets/images/type/a.gif",
-            "https://www.lanzouw.com/icon.png",
-            "https://images.bakstotre.com/not-icons/a.gif",
         ] {
             assert!(validate_asset_syntax(value, &policy).is_err(), "{value}");
+        }
+    }
+
+    #[test]
+    fn test_asset_initial_url_accepts_user_configured_public_https_hosts() {
+        let policy = AssetPolicy::Production;
+        for value in [
+            "https://cdn.example/image/a.png",
+            "https://www.lanzouw.com/icon.png",
+            "https://images.example.org/path/banner.webp?width=1280",
+        ] {
+            assert!(validate_asset_syntax(value, &policy).is_ok(), "{value}");
         }
     }
 

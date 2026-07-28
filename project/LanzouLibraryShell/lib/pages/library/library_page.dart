@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import '../../config/library_config.dart';
 import '../../controllers/library_controller.dart';
 import '../../models/library_item.dart';
+import '../../repositories/library_remote_content_repository.dart';
 import '../../services/download_coordinator.dart';
 import '../../services/library_core.dart';
 import '../../services/link_opener.dart';
@@ -41,6 +42,7 @@ class LibraryPage extends StatefulWidget {
     required this.config,
     required this.core,
     required this.linkOpener,
+    this.remoteContent = const UnavailableLibraryRemoteContentRepository(),
     this.downloads,
     this.debugOnShellBuild,
   });
@@ -48,6 +50,7 @@ class LibraryPage extends StatefulWidget {
   final LibraryConfig config;
   final LibraryCore core;
   final LinkOpener linkOpener;
+  final LibraryRemoteContentRepository remoteContent;
   final DownloadCoordinator? downloads;
 
   /// Test-only hook used to prove that controller notifications stay inside
@@ -220,6 +223,7 @@ class _LibraryPageState extends State<LibraryPage> {
         controller: _controller,
         searchController: _searchController,
         searchFocusNode: _searchFocusNode,
+        remoteContent: widget.remoteContent,
         onSearch: _searchFromHome,
         onOpenSource: _openCompactSource,
         onOpenUrl: (url) => unawaited(widget.linkOpener.open(url)),

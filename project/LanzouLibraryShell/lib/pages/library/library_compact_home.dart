@@ -2,7 +2,9 @@ import 'package:flutter/material.dart';
 
 import '../../config/library_config.dart';
 import '../../controllers/library_controller.dart';
+import '../../repositories/library_remote_content_repository.dart';
 import '../../shared/app_listenable_selector.dart';
+import '../../widgets/library_remote_content.dart';
 import 'library_navigation.dart';
 
 class LibraryCompactHome extends StatelessWidget {
@@ -11,6 +13,7 @@ class LibraryCompactHome extends StatelessWidget {
     required this.controller,
     required this.searchController,
     required this.searchFocusNode,
+    required this.remoteContent,
     required this.onSearch,
     required this.onOpenSource,
     required this.onOpenUrl,
@@ -19,6 +22,7 @@ class LibraryCompactHome extends StatelessWidget {
   final LibraryController controller;
   final TextEditingController searchController;
   final FocusNode searchFocusNode;
+  final LibraryRemoteContentRepository remoteContent;
   final ValueChanged<String> onSearch;
   final ValueChanged<LibrarySource> onOpenSource;
   final ValueChanged<String> onOpenUrl;
@@ -68,13 +72,11 @@ class LibraryCompactHome extends StatelessWidget {
                 borderRadius: BorderRadius.circular(8),
                 child: AspectRatio(
                   aspectRatio: 16 / 9,
-                  child: Image.network(
-                    config.home.splashImage,
+                  child: LibraryRemoteImage(
+                    url: config.home.splashImage,
+                    repository: remoteContent,
+                    semanticLabel: '启动图',
                     fit: BoxFit.cover,
-                    errorBuilder: (_, _, _) => const ColoredBox(
-                      color: Color(0xFFE9EEF8),
-                      child: Center(child: Icon(Icons.broken_image_outlined)),
-                    ),
                   ),
                 ),
               ),
@@ -108,13 +110,11 @@ class LibraryCompactHome extends StatelessWidget {
                   borderRadius: BorderRadius.circular(8),
                   child: AspectRatio(
                     aspectRatio: 16 / 9,
-                    child: Image.network(
-                      config.home.carouselImages[index],
+                    child: LibraryRemoteImage(
+                      url: config.home.carouselImages[index],
+                      repository: remoteContent,
+                      semanticLabel: '轮播图 ${index + 1}',
                       fit: BoxFit.cover,
-                      errorBuilder: (_, _, _) => const ColoredBox(
-                        color: Color(0xFFE9EEF8),
-                        child: Center(child: Icon(Icons.broken_image_outlined)),
-                      ),
                     ),
                   ),
                 ),
@@ -129,24 +129,20 @@ class LibraryCompactHome extends StatelessWidget {
               child: Column(
                 children: [
                   if (config.home.announcementUrl.isNotEmpty)
-                    ListTile(
-                      key: const Key('home-remote-announcement'),
-                      leading: const Icon(Icons.campaign_outlined),
-                      title: const Text('远程公告'),
-                      trailing: const Icon(Icons.open_in_new),
-                      onTap: () => onOpenUrl(config.home.announcementUrl),
+                    LibraryRemoteAnnouncement(
+                      url: config.home.announcementUrl,
+                      repository: remoteContent,
+                      onOpenUrl: () => onOpenUrl(config.home.announcementUrl),
                     ),
                   for (final page in config.home.webPages)
                     ListTile(
                       key: ValueKey('home-web-${page.name}'),
                       leading: page.icon.isEmpty
                           ? const Icon(Icons.web_outlined)
-                          : Image.network(
-                              page.icon,
-                              width: 28,
-                              height: 28,
-                              errorBuilder: (_, _, _) =>
-                                  const Icon(Icons.web_outlined),
+                          : LibraryRemoteImageIcon(
+                              url: page.icon,
+                              repository: remoteContent,
+                              semanticLabel: '${page.name}图标',
                             ),
                       title: Text(page.name),
                       trailing: const Icon(Icons.chevron_right),

@@ -3,6 +3,7 @@ mod asset;
 mod browse;
 mod catalog;
 mod direct_link;
+mod document;
 mod download;
 mod handle_registry;
 mod html;

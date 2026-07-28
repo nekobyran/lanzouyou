@@ -141,6 +141,57 @@ void main() {
       expect(config.branding.publisher, isEmpty);
     });
 
+    test('parses canonical remote home content and preserves visibility', () {
+      final config = LibraryConfig.fromJson({
+        'schemaVersion': 1,
+        'identity': canonicalIdentity,
+        'branding': canonicalBranding,
+        'home': {
+          'visible': false,
+          'splashImage': 'https://assets.example.test/splash.png',
+          'splashText': '欢迎使用',
+          'carouselImages': ['https://assets.example.test/carousel.png'],
+          'announcementUrl': 'https://www.lanzouw.com/bannouncement',
+          'webPages': [
+            {
+              'name': '文档',
+              'url': 'https://docs.example.test',
+              'icon': 'https://assets.example.test/docs.png',
+            },
+          ],
+        },
+        'sources': [canonicalSource('source_one', '示例源')],
+        'features': canonicalFeatures,
+      });
+
+      expect(config.home.visible, isFalse);
+      expect(config.home.splashText, '欢迎使用');
+      expect(config.home.carouselImages, hasLength(1));
+      expect(config.home.announcementUrl, endsWith('/bannouncement'));
+      expect(config.home.webPages.single.name, '文档');
+    });
+
+    test('rejects insecure remote home content URLs', () {
+      expect(
+        () => LibraryConfig.fromJson({
+          'schemaVersion': 1,
+          'identity': canonicalIdentity,
+          'branding': canonicalBranding,
+          'home': {
+            'visible': true,
+            'splashImage': 'http://assets.example.test/splash.png',
+            'splashText': '',
+            'carouselImages': <Object?>[],
+            'announcementUrl': '',
+            'webPages': <Object?>[],
+          },
+          'sources': [canonicalSource('source_one', '示例源')],
+          'features': canonicalFeatures,
+        }),
+        throwsA(isA<LibraryConfigException>()),
+      );
+    });
+
     test('does not expose malformed JSON contents in load errors', () async {
       final loader = LibraryConfigLoader.testHarness(
         bundle: StringAssetBundle('{"password":"secret-value",'),

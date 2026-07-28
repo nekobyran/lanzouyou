@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import 'config/library_config.dart';
 import 'pages/library/library_page.dart';
+import 'repositories/library_remote_content_repository.dart';
 import 'services/library_core.dart';
 import 'services/link_opener.dart';
 import 'services/rust_library_core.dart';
@@ -27,11 +28,15 @@ class EmbeddedLibraryPreview extends StatelessWidget {
     required LibraryConfig config,
   }) {
     _requireSafePreviewConfig(config);
+    final core = RustLibraryCore.production();
     return EmbeddedLibraryPreview._(
       key: key,
       config: config,
-      core: RustLibraryCore.production(),
+      core: core,
       linkOpener: const UrlLauncherLinkOpener(),
+      remoteContent: CachedLibraryRemoteContentRepository.production(
+        core: core,
+      ),
     );
   }
 
@@ -40,6 +45,8 @@ class EmbeddedLibraryPreview extends StatelessWidget {
     required LibraryConfig config,
     required LibraryCore core,
     required LinkOpener linkOpener,
+    LibraryRemoteContentRepository remoteContent =
+        const UnavailableLibraryRemoteContentRepository(),
   }) {
     _requireSafePreviewConfig(config);
     return EmbeddedLibraryPreview._(
@@ -47,6 +54,7 @@ class EmbeddedLibraryPreview extends StatelessWidget {
       config: config,
       core: core,
       linkOpener: linkOpener,
+      remoteContent: remoteContent,
     );
   }
 
@@ -55,11 +63,13 @@ class EmbeddedLibraryPreview extends StatelessWidget {
     required this.config,
     required this.core,
     required this.linkOpener,
+    required this.remoteContent,
   });
 
   final LibraryConfig config;
   final LibraryCore core;
   final LinkOpener linkOpener;
+  final LibraryRemoteContentRepository remoteContent;
 
   @override
   Widget build(BuildContext context) {
@@ -85,6 +95,7 @@ class EmbeddedLibraryPreview extends StatelessWidget {
                     config: config,
                     core: core,
                     linkOpener: linkOpener,
+                    remoteContent: remoteContent,
                   ),
                 ),
               ),

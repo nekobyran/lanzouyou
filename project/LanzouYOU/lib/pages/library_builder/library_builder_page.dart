@@ -8,7 +8,9 @@ import 'package:lanzou_library_shell/library_preview.dart' as shell;
 import 'package:path_provider/path_provider.dart';
 
 import '../../models/cloud_item.dart';
+import '../../services/cloud_service.dart';
 import '../../shared/app_motion.dart';
+import 'library_cloud_content_page.dart';
 import 'library_builder_service.dart';
 import 'library_preview/library_preview_page.dart';
 import 'library_recipe.dart';
@@ -17,6 +19,7 @@ class LibraryBuilderPage extends StatefulWidget {
   const LibraryBuilderPage({
     required Future<ShareInfo> shareInfo,
     this.initialRecipe,
+    this.cloudService,
     this.buildService,
     this.projectStore,
     this.hostPlatform,
@@ -31,6 +34,7 @@ class LibraryBuilderPage extends StatefulWidget {
 
   const LibraryBuilderPage.newProject({
     this.initialRecipe,
+    this.cloudService,
     this.buildService,
     this.projectStore,
     this.hostPlatform,
@@ -45,6 +49,7 @@ class LibraryBuilderPage extends StatefulWidget {
 
   final Future<ShareInfo>? _seedShareInfo;
   final LibraryBuildRecipe? initialRecipe;
+  final CloudService? cloudService;
   final LibraryBuildService? buildService;
   final LibraryProjectStore? projectStore;
   final TargetPlatform? hostPlatform;
@@ -245,6 +250,11 @@ class _LibraryBuilderPageState extends State<LibraryBuilderPage> {
               setState(() => _recipe = recipe.copyWith(home: home)),
           onBuildChanged: (build) =>
               setState(() => _recipe = recipe.copyWith(build: build)),
+          onOpenCloudContent:
+              widget.cloudService != null &&
+                  recipe.workspace.rootFolderId.trim().isNotEmpty
+              ? _openCloudContent
+              : null,
           lastResult: wide ? null : _lastResult,
         );
         if (!wide) {
@@ -445,6 +455,29 @@ class _LibraryBuilderPageState extends State<LibraryBuilderPage> {
     });
   }
 
+  Future<void> _openCloudContent() async {
+    final cloudService = widget.cloudService;
+    if (cloudService == null) return;
+    _syncTextRecipe();
+    final recipe = _recipe;
+    if (recipe == null || recipe.workspace.rootFolderId.trim().isEmpty) return;
+    final controller = LibraryCloudContentController(
+      cloudService: cloudService,
+      initialRecipe: recipe,
+      onRecipeChanged: (updated) async {
+        await _projectStore.save(updated);
+        if (!mounted) return;
+        _setControllers(updated);
+        setState(() => _recipe = updated);
+      },
+    );
+    await Navigator.of(context).push<void>(
+      MaterialPageRoute(
+        builder: (_) => LibraryCloudContentPage(controller: controller),
+      ),
+    );
+  }
+
   Future<void> _addSource() async {
     final source = await showDialog<LibrarySourceRecipe>(
       context: context,
@@ -595,6 +628,7 @@ class _RecipeEditor extends StatelessWidget {
     required this.onFeaturesChanged,
     required this.onHomeChanged,
     required this.onBuildChanged,
+    required this.onOpenCloudContent,
     required this.lastResult,
   });
 
@@ -608,6 +642,7 @@ class _RecipeEditor extends StatelessWidget {
   final ValueChanged<LibraryFeatures> onFeaturesChanged;
   final ValueChanged<LibraryHomeContent> onHomeChanged;
   final ValueChanged<LibraryBuildOptions> onBuildChanged;
+  final VoidCallback? onOpenCloudContent;
   final LibraryBuildResult? lastResult;
 
   @override
@@ -624,6 +659,18 @@ class _RecipeEditor extends StatelessWidget {
               ),
               actions: const [SizedBox.shrink()],
             ),
+          if (onOpenCloudContent != null) ...[
+            ListTile(
+              key: const Key('library-cloud-content-entry'),
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.cloud_outlined),
+              title: const Text('云内容'),
+              subtitle: const Text('管理图库、远程文档、网页与 rjk 绑定状态'),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: onOpenCloudContent,
+            ),
+            const Divider(height: 1),
+          ],
           const _SectionTitle('应用身份'),
           _field(
             controllers[0],

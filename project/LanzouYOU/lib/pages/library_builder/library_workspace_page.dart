@@ -262,7 +262,11 @@ class _LibraryWorkspacePageState extends State<LibraryWorkspacePage>
   Future<void> _open(LibraryBuildRecipe recipe) async {
     await Navigator.of(context).push<void>(
       MaterialPageRoute(
-        builder: (_) => LibraryBuilderPage.newProject(initialRecipe: recipe),
+        builder: (_) => LibraryBuilderPage.newProject(
+          initialRecipe: recipe,
+          cloudService: widget.cloudService,
+          projectStore: _store,
+        ),
       ),
     );
     _reload();
