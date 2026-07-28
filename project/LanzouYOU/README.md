@@ -131,6 +131,12 @@ pwsh -NoProfile -File .\command\Publish-LanzouMax.ps1 -VerifyReadback
 - 图标绑定与非幂等写入按账号串行；关联状态不明确时先回读，不盲目重放。
 - 永久删除与清空回收站必须二次确认，不使用生产数据做破坏性测试。
 
+## 开源许可证
+
+本项目采用 [MIT License](LICENSE)。允许个人与商业使用、修改及再分发；复制或分发本软件及其重要部分时，必须保留原版权声明与许可声明。
+
+版权归 nekobyran 所有，Copyright (c) 2026 nekobyran。
+
 ## 协议参考与许可证边界
 
 协议行为固定参考 OpenList commit [`eb48671202247406a451187a8c62fae943acfc3b`](https://github.com/OpenListTeam/OpenList/tree/eb48671202247406a451187a8c62fae943acfc3b/drivers/lanzou)。OpenList 使用 AGPL-3.0；LanzouYOU Rust core 是独立实现，当前不包含 OpenList 源文件。若未来复制、修改、链接或分发其派生代码，必须先评估并履行适用的 AGPL 义务。
