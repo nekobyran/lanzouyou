@@ -78,14 +78,15 @@ void main() {
             },
           ],
         },
-      );
+    );
     final controller = TransferController(cloud);
+    addTearDown(controller.dispose);
     controller.enqueueDirectoryUpload(
       folderId: '-1',
       request: const DirectoryUploadRequest(path: r'D:\软件合集'),
       onFolderChanged: () {},
     );
-    await _waitForTransfer(controller);
+    await _waitForTransfer(tester, controller);
 
     await tester.pumpWidget(
       MaterialApp(
@@ -107,11 +108,14 @@ void main() {
   });
 }
 
-Future<void> _waitForTransfer(TransferController controller) async {
+Future<void> _waitForTransfer(
+  WidgetTester tester,
+  TransferController controller,
+) async {
   final deadline = DateTime.now().add(const Duration(seconds: 2));
   while (controller.hasRunning ||
       controller.entries.any((entry) => entry.state.name == 'queued')) {
     if (DateTime.now().isAfter(deadline)) fail('transfer did not finish');
-    await Future<void>.delayed(const Duration(milliseconds: 1));
+    await tester.pump(const Duration(milliseconds: 1));
   }
 }

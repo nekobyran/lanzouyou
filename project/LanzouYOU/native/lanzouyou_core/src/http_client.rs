@@ -375,7 +375,9 @@ impl HttpClient {
                 });
                 operation.set_transfer_progress(
                     window.base_bytes,
-                    window.total_bytes.max(window.base_bytes.saturating_add(length)),
+                    window
+                        .total_bytes
+                        .max(window.base_bytes.saturating_add(length)),
                 );
             }
             let reader = ProgressReader::new(file, operation.cloned());

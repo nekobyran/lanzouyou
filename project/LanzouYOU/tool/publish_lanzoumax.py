@@ -825,16 +825,27 @@ class Publisher:
             except PublishError as error:
                 if self._is_in_recycle(item.id):
                     recycled.append(item)
+                    if error.code == "core_ambiguous_result":
+                        # The delete committed but the response was ambiguous.
+                        # Recycle readback is authoritative and preserves
+                        # rollback capability, so continuing is safe.
+                        continue
                     raise
                 raise PublishError(error.code, rollback_incomplete=True) from None
-        self.core.call(
-            {
-                "op": "rename",
-                "id": plan.stage.id,
-                "isFolder": False,
-                "name": self.final_name,
-            }
-        )
+        try:
+            self.core.call(
+                {
+                    "op": "rename",
+                    "id": plan.stage.id,
+                    "isFolder": False,
+                    "name": self.final_name,
+                }
+            )
+        except PublishError as error:
+            if error.code != "core_ambiguous_result":
+                raise
+            # Never replay an ambiguous rename: verified final-name readback
+            # below decides whether the mutation actually committed.
         self._wait_for_verified_file(
             plan.folder.id,
             plan.stage.id,

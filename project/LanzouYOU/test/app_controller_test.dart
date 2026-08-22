@@ -40,35 +40,7 @@ void main() {
     'login loads real account, membership and personalization capabilities',
     () async {
       final cloud = FakeCloudService()
-        ..accountCapabilitiesResult = AccountCapabilities(
-          authenticated: true,
-          userId: 'member-user',
-          accountPortalUrl: Uri.parse(
-            'https://pc.woozooo.com/mydisk.php?item=profile&action=mypower',
-          ),
-          accountFeatures: const <String>['文件大小与云空间统计', '上传格式权限'],
-          membership: RemoteCapability(
-            state: 'available',
-            portalUrl: Uri.parse(
-              'https://pc.woozooo.com/mydisk.php?item=profile&action=huiyuan',
-            ),
-            reason: '由蓝奏云官方页面管理',
-            readable: false,
-            writable: false,
-            features: const <String>['会员购买与续费', '下载流量包'],
-          ),
-          personalization: RemoteCapability(
-            state: 'available',
-            portalUrl: Uri.parse(
-              'https://pc.woozooo.com/mydisk.php?item=profile&action=huiyuan',
-            ),
-            reason: '由蓝奏云官方页面管理',
-            readable: false,
-            writable: false,
-            features: const <String>['发布者昵称', '文件头像', '下载页模板'],
-          ),
-          acceptsPaymentData: false,
-        );
+        ..accountCapabilitiesResult = buildVipAccountCapabilitiesFixture();
       final controller = AppController(
         cloudService: cloud,
         sessionStore: MemorySessionStore(),
@@ -82,8 +54,23 @@ void main() {
       expect(controller.accountCapabilitiesError, isNull);
       expect(controller.currentAccountCapabilities?.authenticated, isTrue);
       expect(
-        controller.currentAccountCapabilities?.personalization.features,
-        contains('文件头像'),
+        controller.currentAccountCapabilities?.membershipProfile.state,
+        MembershipState.vip,
+      );
+      expect(
+        controller.currentAccountCapabilities?.membershipProfile.displayName,
+        '会员个性化',
+      );
+      expect(
+        controller.currentAccountCapabilities?.membershipProfile.expiresAt,
+        DateTime(2027, 7, 30),
+      );
+      expect(controller.currentAccountCapabilities?.plans, hasLength(7));
+      expect(
+        controller.currentAccountCapabilities?.personalization.map(
+          (setting) => setting.title,
+        ),
+        contains('头像上传'),
       );
       expect(
         controller.currentAccountCapabilities?.acceptsPaymentData,

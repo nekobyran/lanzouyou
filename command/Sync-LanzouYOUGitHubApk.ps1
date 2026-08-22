@@ -120,7 +120,11 @@ try {
     }
 
 $repoInfo = Invoke-GhJson @('repo', 'view', $Repo, '--json', 'isPrivate,nameWithOwner')
-if ($repoInfo.isPrivate -ne $true) { throw 'The target repository must be private.' }
+if ($AllowPublic) {
+    if ($repoInfo.isPrivate -ne $false) { throw 'The target mirror repository must be public.' }
+} elseif ($repoInfo.isPrivate -ne $true) {
+    throw 'The target repository must be private.'
+}
 $release = Invoke-GhJson @('api', "repos/$Repo/releases/tags/$Tag")
 $sha256 = (Get-FileHash -LiteralPath $apk.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
 $stable = @($release.assets | Where-Object { $_.name -ceq $AssetName })

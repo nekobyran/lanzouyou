@@ -33,17 +33,16 @@ pub(crate) struct LibraryDocument {
 enum DocumentPolicy {
     Production,
     #[cfg(test)]
-    Test { origin: String },
+    Test {
+        origin: String,
+    },
 }
 
 pub(crate) fn fetch_text(value: &str) -> CoreResult<LibraryDocument> {
     fetch_text_with_policy(value, DocumentPolicy::Production)
 }
 
-fn fetch_text_with_policy(
-    value: &str,
-    policy: DocumentPolicy,
-) -> CoreResult<LibraryDocument> {
+fn fetch_text_with_policy(value: &str, policy: DocumentPolicy) -> CoreResult<LibraryDocument> {
     let initial = validate_document_syntax(value, &policy)?;
     let client = build_client(&initial, &policy)?;
     let mut current = initial.clone();
@@ -92,7 +91,10 @@ fn fetch_text_with_policy(
         let bytes = read_limited(response)?;
         let text = String::from_utf8(bytes)
             .map_err(|_| CoreError::parse("远程文档不是有效 UTF-8 文本"))?;
-        let text = text.strip_prefix('\u{feff}').unwrap_or(&text).replace('\r', "");
+        let text = text
+            .strip_prefix('\u{feff}')
+            .unwrap_or(&text)
+            .replace('\r', "");
         if text.contains('\0') {
             return Err(CoreError::parse("远程文档包含无效字符"));
         }
@@ -111,8 +113,8 @@ fn validate_document_syntax(value: &str, policy: &DocumentPolicy) -> CoreResult<
         DocumentPolicy::Production => {
             reject_explicit_port_reference(value)
                 .map_err(|_| CoreError::invalid("远程文档地址包含显式端口"))?;
-            let parsed = Url::parse(value.trim())
-                .map_err(|_| CoreError::invalid("远程文档地址格式无效"))?;
+            let parsed =
+                Url::parse(value.trim()).map_err(|_| CoreError::invalid("远程文档地址格式无效"))?;
             if parsed.scheme() != "https" || parsed.host_str().is_none() {
                 return Err(CoreError::invalid("远程文档必须使用 HTTPS 公网地址"));
             }

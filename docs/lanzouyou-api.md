@@ -81,7 +81,7 @@ void lanzouyou_free(char *response_json);
 | `delete` | `id`, `isFolder` | 移入回收站 |
 | `share_info` | `id`, `isFolder` | 分享信息；文件同时解析下载直链 |
 | `get_description` | `id`, `isFolder` | 读取当前账号项的简介 |
-| `account_capabilities` | 无 | 按真实会话返回保守的账号/会员能力，不伪造支付或会员权益 |
+| `account_capabilities` | 无 | 使用当前会话只读获取 `profile/mypower` 与 `profile/huiyuan`，返回会员三态、到期日、9 个个人入口、8 项账号事实、实时套餐候选和 11 项个性化能力；不返回 Cookie/HTML，也不接收付款数据 |
 | `set_password` | `id`, `isFolder`, `password` | 设置或清除提取码 |
 | `set_description` | `id`, `isFolder`, `description` | 设置简介 |
 | `upload` | `folderId`, `path`, `compatWrap`, `kind`, `operationId`（可选） | 普通文件上传；`kind` 仅为 `auto/file`，可报告字节进度并协作取消 |
@@ -184,6 +184,9 @@ void lanzouyou_free(char *response_json);
 | 回收站读取、恢复、永久删除、清空 | 已实现；单项恢复与永久删除生产 FFI 管理冒烟通过 | 动态 `formhash` HTML 流程已实测；文件恢复到账号根目录，不自动回到删除前目录。`recycle_empty` 未用于生产冒烟，永久删除不可撤销 |
 | 本地图标查找、提取与压缩 | 已实现，本地测试 | Flutter 可查找同 stem sidecar；Rust 可解码图片、提取 APK launcher，并在 Windows 使用 Win32 提取 EXE 图标；输出最大 144×144、严格小于 100,000 字节的 PNG |
 | Woozooo 文件自定义图标绑定 | 已实现；协议生产写入与 FFI 管理冒烟通过 | Flutter `prepare_icon/set_icon`、Rust 四段协议和本地 HTTP mock 已接通；管理冒烟使用固定本地图标完成绑定并回读，另一次授权批量操作也完成逐项回读与像素验证 |
+| 原生个人中心 | 源码已接线，聚焦测试通过 | Flutter 窄屏使用子页、宽屏使用主从布局，原生还原“我的权限、财务充值、文件升级、下载提现、提现记录、邀请注册、密码修改、手机号、注销账户”9 个入口；每项先展示应用内详情，需官方确认的操作才进入精确白名单页面 |
+| VIP 识别与会员充值 | 源码已接线，聚焦测试通过 | Rust 仅根据个人页明确标签识别 `vip/free/unknown`，并解析等级和到期日；过期标签或已过期日期归为 `free`。Flutter 原生展示套餐选择、权益和风险提示，应用不读取或提交付款资料，最终购买仅在用户二次确认后打开 `profile/huiyuan` |
+| 会员个性化 | 源码已接线，聚焦测试通过 | Flutter 原生列出免广告下载、上传时间显示、子文件夹、搜索、默认文件密码、头像、下载页模板、发布者昵称、日报、保存时间、直链域名 11 项；当前写端点未完成生产写入/回读验证，全部保持只读，不伪造开关成功 |
 | Rust 内置 catalog 与真实公共列表 | 源码已接线，待最终门禁 | `assets/catalog/{s,h,c}` 与 Java canonical 资产字节和 SHA-256 一致；Rust 索引为 597 官方源、9 合集、2730 文件、34 单软件，共 3370 节点。`catalog_*` 承担分页、真实浏览、搜索、详情、解析和下载，访问码不出 Rust |
 | LanzouYOU 公共软件库 UI | 源码已接线，待最终门禁 | 登录页有“免登录浏览软件库”入口；登录后一级“软件库”打开 `PublicLibraryPage`，而非生成器。页面使用惰性列表/分页、搜索取消、目录/单软件/详情状态；待 Android/Windows 可见验收 |
 | 独立蓝奏设置 | 源码已接线，部分未完成 | 设置首页只有“蓝奏”入口，子页已展示真实 catalog 统计与账号内容；源管理、导入/导出、重测/重置和搜索/下载行为 actions 当前未接真实 capability，禁用行不算支持 |
@@ -215,12 +218,14 @@ recipe 自身仍为 `schemaVersion: 1`；预构建模板集另由 `templates-man
 
 ## 5. 已实测 Woozooo 接口矩阵
 
-以下结果来自 2026-07-14 的一次明确授权操作。这里只保留任务号、用途和计数，不保留会话、签名、文件名、链接或 ID。
+写入和管理闭环结果来自 2026-07-14 的一次明确授权操作；个人中心只读页面证据来自 2026-07-15 的授权 GET 探针。这里只保留用途、结论和计数，不保留会话、签名、文件名、链接或 ID。
 
 | 接口/任务 | 用途 | 实测结果 | 当前 core |
 |---|---|---|---|
 | `mlogin.php` | 账号登录 | 当前 Rust FFI 登录成功，后续会话、根目录列表和注销均成功 | `login` 已生产冒烟 |
 | `mydisk.php` 文件页 | 初始化管理会话与读取目录上下文 | 会话页读取成功 | `login` / `restore_session` 会调用 |
+| `mydisk.php?item=profile&action=mypower` | 个人权限、会员状态和账号入口 | 授权 GET 页面已确认入口与账号事实表面；未执行个人资料写入 | `account_capabilities` 结构化解析并脱敏返回 |
+| `mydisk.php?item=profile&action=huiyuan` | 会员套餐与会员个性化 | 授权 GET 页面已确认套餐/续费/升级表面和 11 类个性化权益；没有已验证的客户端写入端点 | `account_capabilities` 只读解析；最终购买/设置仍由官方页面确认 |
 | `doupload.php` `task=47` | 目录列表 | 目标目录唯一，无目录歧义 | `list` 第 1 页已实现 |
 | `doupload.php` `task=5` | 文件分页 | 读取到 83 个文件，归一化名称无重名 | `list` 已实现 |
 | `doupload.php` `task=12` | 文件信息与简介回读 | 69 项简介逐项一致；标记计数与列表一致 | `share_info` 内部已使用 |
@@ -283,6 +288,8 @@ recipe 自身仍为 `schemaVersion: 1`；预构建模板集另由 `templates-man
 
 - **凭据**：账号和密码只用于一次登录调用，不写配置、文档或日志。
 - **会话**：Flutter 只把 Cookie 写入系统安全存储；Rust 只保存在内存中。注销、过期或恢复失败时清除两端状态。
+- **个人中心与付款**：Flutter 只接受 `https://pc.woozooo.com/mydisk.php` 下精确的 `item/action` 允许列表，拒绝同域错误路径、额外参数、fragment、端口和 URL 凭据。会员套餐在原生界面选择，但应用不接收、读取或提交付款资料；所有最终付款仍由用户二次确认后在官方页面完成。
+- **个性化写入**：未经过生产写入和回读验证的会员个性化项一律只读。页面出现控件或文案不能作为可写证据，不显示虚假开关或成功提示。
 - **日志**：不记录完整请求/响应正文、Cookie、分享直链、OSS 字段或用户文件元数据。
 - **TLS**：Rust 使用 rustls 并保持证书校验，不提供跳过 TLS 校验的兼容开关。
 - **请求重试**：幂等 GET/下载最多 3 次并有限退避；普通 POST、普通上传、OSS 上传和图标关联遇到网络中断、5xx 或服务繁忙时不自动重放，而是返回“结果不明确”。`acw_sc__v2` 挑战可在受限次数内刷新后重试。

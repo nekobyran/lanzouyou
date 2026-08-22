@@ -107,35 +107,35 @@ impl SessionClient {
 
     pub fn account_capabilities(&self) -> CoreResult<Value> {
         self.require_session()?;
+        let url = format!("{}/mydisk.php", self.http.bases.pc);
+        let mypower = self.http.get(
+            &url,
+            &self.cookie,
+            &[
+                ("item".to_owned(), "profile".to_owned()),
+                ("action".to_owned(), "mypower".to_owned()),
+            ],
+        )?;
+        let huiyuan = self.http.get(
+            &url,
+            &self.cookie,
+            &[
+                ("item".to_owned(), "profile".to_owned()),
+                ("action".to_owned(), "huiyuan".to_owned()),
+            ],
+        )?;
+        let surface = parser::account_surface(mypower.text()?, huiyuan.text()?)?;
         Ok(json!({
             "authenticated": true,
             "userId": self.uid,
-            "accountPortalUrl": "https://pc.woozooo.com/mydisk.php?item=profile&action=mypower",
-            "accountFeatures": [
-                "个性域名", "增值服务", "密码修改", "手机号", "注销账户",
-                "单个文件大小", "云存储统计", "下载免登录", "下载速度",
-                "下载次数", "下载流量", "存储空间", "允许上传类型"
-            ],
-            "membership": {
-                "state": "available",
-                "portalUrl": "https://pc.woozooo.com/mydisk.php?item=profile&action=huiyuan",
-                "reason": "蓝奏云官方页面可查看套餐并完成开通或续费；付款必须由用户在官方页面确认",
-                "readable": false,
-                "writable": false,
-                "features": ["续费/升级", "选择购买时长", "包月", "包年", "下载包"]
-            },
-            "personalization": {
-                "state": "available",
-                "portalUrl": "https://pc.woozooo.com/mydisk.php?item=profile&action=huiyuan",
-                "readable": false,
-                "writable": false,
-                "reason": "蓝奏云官方页面提供这些会员设置；当前未验证稳定且安全的直接读写接口",
-                "features": [
-                    "免广告下载", "上传时间隐藏/显示", "子文件夹", "搜索",
-                    "新文件密码默认开关", "头像上传", "下载页模板", "发布者昵称",
-                    "日下载报表", "文件保存时间", "直链域名绑定"
-                ]
-            },
+            "accountPortalUrl": parser::ACCOUNT_PORTAL_URL,
+            "membershipPortalUrl": parser::MEMBERSHIP_PORTAL_URL,
+            "personalizationPortalUrl": parser::MEMBERSHIP_PORTAL_URL,
+            "membershipProfile": surface["membershipProfile"],
+            "entries": surface["entries"],
+            "facts": surface["facts"],
+            "plans": surface["plans"],
+            "personalization": surface["personalization"],
             "acceptsPaymentData": false
         }))
     }
@@ -814,8 +814,37 @@ mod tests {
     }
 
     #[test]
-    fn test_account_capabilities_exposes_no_cookie_or_payment_input() {
-        let mut session = SessionClient::for_test("http://127.0.0.1:9".to_owned()).unwrap();
+    fn test_account_capabilities_reads_live_pages_and_exposes_no_secrets() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let base = format!("http://{address}");
+        let server = std::thread::spawn(move || {
+            let responses = [
+                r#"<table><tr><th>会员状态</th><td>免费用户</td></tr><tr><th>存储空间</th><td>2 TB</td></tr></table><nav>我的权限 财务充值 文件升级 下载提现 提现记录 邀请注册 密码修改 手机号 注销账户</nav><input name="formhash" value="private-formhash">"#,
+                r#"<div>会员增值服务 包月 包年 下载包 免广告下载 搜索 直链域名绑定</div><script>var token='private-token';</script>"#,
+            ];
+            for (index, body) in responses.into_iter().enumerate() {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0_u8; 4096];
+                let read = stream.read(&mut request).unwrap();
+                let request = String::from_utf8_lossy(&request[..read]);
+                let expected_action = if index == 0 { "mypower" } else { "huiyuan" };
+                assert!(request.starts_with("GET /mydisk.php?"));
+                assert!(request.contains("item=profile"));
+                assert!(request.contains(&format!("action={expected_action}")));
+                assert!(request
+                    .to_ascii_lowercase()
+                    .contains("cookie: private-session-cookie"));
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            }
+        });
+
+        let mut session = SessionClient::for_test(base).unwrap();
         session.cookie = "private-session-cookie".to_owned();
         session.uid = "101".to_owned();
         session.vei = "202".to_owned();
@@ -826,24 +855,59 @@ mod tests {
             value["accountPortalUrl"],
             "https://pc.woozooo.com/mydisk.php?item=profile&action=mypower"
         );
-        assert_eq!(value["membership"]["state"], "available");
+        assert_eq!(value["membershipProfile"]["state"], "free");
         assert_eq!(
-            value["membership"]["portalUrl"],
+            value["membershipPortalUrl"],
             "https://pc.woozooo.com/mydisk.php?item=profile&action=huiyuan"
         );
-        assert_eq!(value["personalization"]["state"], "available");
-        assert_eq!(value["personalization"]["writable"], false);
-        assert!(value["personalization"]["features"]
+        assert_eq!(
+            value["personalizationPortalUrl"],
+            "https://pc.woozooo.com/mydisk.php?item=profile&action=huiyuan"
+        );
+        assert!(value["personalization"]
             .as_array()
-            .is_some_and(|items| items.iter().any(|item| item == "下载页模板")));
-        assert!(value["accountFeatures"]
+            .is_some_and(|items| items.iter().all(|item| item["writable"] == false)));
+        assert!(value["entries"]
             .as_array()
-            .is_some_and(|items| items.iter().any(|item| item == "云存储统计")));
+            .is_some_and(|items| items.len() == 9));
         assert_eq!(value["acceptsPaymentData"], false);
         let serialized = value.to_string();
         assert!(!serialized.contains("private-session-cookie"));
-        assert!(!serialized.contains("password"));
-        assert!(!serialized.contains("card"));
+        assert!(!serialized.contains("private-formhash"));
+        assert!(!serialized.contains("private-token"));
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn test_account_capabilities_maps_expired_profile_page_to_session_expired() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let base = format!("http://{address}");
+        let server = std::thread::spawn(move || {
+            for body in [
+                "<title>用户登录</title>网盘用户登录",
+                "<div>会员增值服务</div>",
+            ] {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0_u8; 4096];
+                let _ = stream.read(&mut request).unwrap();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            }
+        });
+        let mut session = SessionClient::for_test(base).unwrap();
+        session.cookie = "session=expired".to_owned();
+        session.uid = "101".to_owned();
+        session.vei = "202".to_owned();
+
+        let error = session.account_capabilities().unwrap_err();
+
+        assert_eq!(error.code, "session_expired");
+        server.join().unwrap();
     }
 
     #[test]

@@ -89,7 +89,7 @@ void main() {
 
     await tester.tap(find.byKey(const Key('lanzou-account-settings')));
     await tester.pumpAndSettle();
-    expect(find.text('蓝奏账号会话'), findsOneWidget);
+    expect(find.text('个人中心'), findsOneWidget);
     expect(find.byKey(const Key('logout-tile')), findsOneWidget);
 
     await tester.binding.setSurfaceSize(const Size(1100, 800));

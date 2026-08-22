@@ -173,7 +173,9 @@ fn execute_directory_plan<B: DirectoryUploadBackend>(
                 PlannedEntryKind::Directory => "create_folder",
                 PlannedEntryKind::File => "upload_file",
             };
-            result.failures.push(directory_failure(entry, stage, &error));
+            result
+                .failures
+                .push(directory_failure(entry, stage, &error));
             if entry.kind == PlannedEntryKind::File {
                 result.processed_files = result.processed_files.saturating_add(1);
                 if let Some(operation) = operation {
@@ -191,11 +193,11 @@ fn execute_directory_plan<B: DirectoryUploadBackend>(
                         remote_folders.insert(entry.relative_path.clone(), id);
                         result.created_directories = result.created_directories.saturating_add(1);
                     }
-                    Err(error) => result.failures.push(directory_failure(
-                        entry,
-                        "create_folder",
-                        &error,
-                    )),
+                    Err(error) => {
+                        result
+                            .failures
+                            .push(directory_failure(entry, "create_folder", &error))
+                    }
                 }
             }
             PlannedEntryKind::File => {
@@ -246,9 +248,9 @@ fn execute_directory_plan<B: DirectoryUploadBackend>(
                                             result.state = "cancelled";
                                             break;
                                         }
-                                        Err(error) => result.failures.push(directory_failure(
-                                            entry, "set_icon", &error,
-                                        )),
+                                        Err(error) => result
+                                            .failures
+                                            .push(directory_failure(entry, "set_icon", &error)),
                                     }
                                 }
                                 Err(error) if error.code == "cancelled" => {
@@ -353,15 +355,20 @@ impl DirectoryUploadBackend for SessionClient {
                 validate_file_for_upload(path, allowed_root, planned_original_bytes)?;
                 let value = self.upload(
                     folder_id,
-                    path.to_str().ok_or_else(|| CoreError::invalid("文件路径不是有效 UTF-8"))?,
+                    path.to_str()
+                        .ok_or_else(|| CoreError::invalid("文件路径不是有效 UTF-8"))?,
                     compat_wrap,
                     kind,
                 )?;
                 let id = value["id"]
                     .as_str()
-                    .ok_or_else(|| CoreError::new("missing_uploaded_file_id", "无法确认上传文件 ID", false))?
+                    .ok_or_else(|| {
+                        CoreError::new("missing_uploaded_file_id", "无法确认上传文件 ID", false)
+                    })?
                     .to_owned();
-                let original_bytes = value["originalBytes"].as_u64().unwrap_or(planned_original_bytes);
+                let original_bytes = value["originalBytes"]
+                    .as_u64()
+                    .unwrap_or(planned_original_bytes);
                 let uploaded_bytes = value["uploadedBytes"].as_u64().unwrap_or(original_bytes);
                 Ok(DirectoryUploadedFile {
                     id,
@@ -400,11 +407,7 @@ impl DirectoryUploadBackend for SessionClient {
 }
 
 fn scan_directory(root: &Path) -> CoreResult<DirectoryPlan> {
-    scan_directory_with_limits(
-        root,
-        MAX_DIRECTORY_UPLOAD_DEPTH,
-        MAX_DIRECTORY_UPLOAD_ITEMS,
-    )
+    scan_directory_with_limits(root, MAX_DIRECTORY_UPLOAD_DEPTH, MAX_DIRECTORY_UPLOAD_ITEMS)
 }
 
 fn scan_directory_with_limits(
@@ -717,8 +720,7 @@ mod tests {
 
     use super::*;
 
-    static TEST_ICON_COUNTER: std::sync::atomic::AtomicU64 =
-        std::sync::atomic::AtomicU64::new(0);
+    static TEST_ICON_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
     #[test]
     fn test_scan_directory_preserves_hierarchy_and_sorts_parents_first() {
@@ -792,9 +794,7 @@ mod tests {
         let root = temp.path().join("root");
         fs::create_dir_all(root.join("a/b/c")).unwrap();
         assert_eq!(
-            scan_directory_with_limits(&root, 2, 100)
-                .unwrap_err()
-                .code,
+            scan_directory_with_limits(&root, 2, 100).unwrap_err().code,
             "directory_depth_limit"
         );
 
@@ -886,7 +886,10 @@ mod tests {
         assert_eq!(backend.prepared_icons.borrow().len(), 1);
         assert_eq!(backend.bound_icons.borrow().len(), 1);
         assert!(!backend.prepared_icons.borrow()[0].exists());
-        assert_eq!(operation.status().state, crate::operation::OperationState::Succeeded);
+        assert_eq!(
+            operation.status().state,
+            crate::operation::OperationState::Succeeded
+        );
         crate::operation::forget("directory-execute-success").unwrap();
     }
 
@@ -922,7 +925,10 @@ mod tests {
         assert_eq!(result.failures.len(), 1);
         assert_eq!(result.failures[0].relative_path, "bad.apk");
         assert_eq!(result.failures[0].stage, "upload_file");
-        assert_eq!(operation.status().state, crate::operation::OperationState::Failed);
+        assert_eq!(
+            operation.status().state,
+            crate::operation::OperationState::Failed
+        );
         crate::operation::forget("directory-execute-partial").unwrap();
     }
 
@@ -955,7 +961,10 @@ mod tests {
         assert_eq!(result.processed_files, 1);
         assert_eq!(result.uploaded_files, 1);
         assert_eq!(backend.uploaded.borrow().len(), 1);
-        assert_eq!(operation.status().state, crate::operation::OperationState::Cancelled);
+        assert_eq!(
+            operation.status().state,
+            crate::operation::OperationState::Cancelled
+        );
         crate::operation::forget("directory-execute-cancel").unwrap();
     }
 
@@ -1140,11 +1149,8 @@ mod tests {
     }
 
     fn test_operation(id: &str) -> OperationHandle {
-        crate::operation::begin(
-            Some(id),
-            crate::operation::OperationKind::DirectoryUpload,
-        )
-        .unwrap()
-        .unwrap()
+        crate::operation::begin(Some(id), crate::operation::OperationKind::DirectoryUpload)
+            .unwrap()
+            .unwrap()
     }
 }

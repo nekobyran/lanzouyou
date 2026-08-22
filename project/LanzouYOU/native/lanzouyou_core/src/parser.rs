@@ -1,7 +1,12 @@
-use std::collections::BTreeMap;
+use std::{
+    collections::BTreeMap,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
+use once_cell::sync::Lazy;
 use regex::Regex;
-use serde_json::Value;
+use scraper::{ElementRef, Html, Selector};
+use serde_json::{json, Value};
 
 use crate::{
     error::{CoreError, CoreResult},
@@ -178,14 +183,656 @@ pub fn bootstrap_values(html: &str) -> CoreResult<(String, String)> {
 }
 
 pub fn ensure_session_html(html: &str) -> CoreResult<()> {
-    if html.contains("网盘用户登录")
-        || html.contains("<title>用户登录")
-        || html.contains("<title>登录蓝奏云")
-    {
+    let document = Html::parse_document(html);
+    let title_selector = static_selector("title");
+    let title = document
+        .select(&title_selector)
+        .map(element_text)
+        .collect::<Vec<_>>()
+        .join(" ");
+    let compact_title = title
+        .chars()
+        .filter(|character| !character.is_whitespace())
+        .collect::<String>();
+    let password_selector =
+        static_selector(r#"input[type="password"], input[name="password"], input[name="passwd"]"#);
+    let visible = visible_text(&document);
+    let has_login_form = document.select(&password_selector).next().is_some()
+        && (visible.contains("登录") || visible.contains("登陆"));
+    let has_login_title = ["网盘用户登录", "用户登录", "登录蓝奏云"]
+        .iter()
+        .any(|marker| compact_title.contains(marker));
+
+    if has_login_title || has_login_form {
         Err(CoreError::session_expired())
     } else {
         Ok(())
     }
+}
+
+pub const ACCOUNT_PORTAL_URL: &str =
+    "https://pc.woozooo.com/mydisk.php?item=profile&action=mypower";
+pub const MEMBERSHIP_PORTAL_URL: &str =
+    "https://pc.woozooo.com/mydisk.php?item=profile&action=huiyuan";
+
+pub fn account_surface(mypower_html: &str, huiyuan_html: &str) -> CoreResult<Value> {
+    ensure_session_html(mypower_html)?;
+    ensure_session_html(huiyuan_html)?;
+
+    let mypower = Html::parse_document(mypower_html);
+    let huiyuan = Html::parse_document(huiyuan_html);
+    let mypower_text = visible_text(&mypower);
+    let huiyuan_text = visible_text(&huiyuan);
+
+    Ok(json!({
+        "membershipProfile": membership_profile(&mypower),
+        "entries": account_entries(&mypower_text),
+        "facts": account_facts(&mypower),
+        "plans": membership_plans(&huiyuan),
+        "personalization": personalization_features(&huiyuan_text),
+    }))
+}
+
+fn membership_profile(document: &Html) -> Value {
+    let status = structured_value(document, &["会员状态", "我的会员", "账号级别", "会员等级"]);
+    let level = structured_value(document, &["会员等级", "账号级别"]);
+    let expires_at = structured_value(
+        document,
+        &["会员到期", "到期时间", "有效期至", "会员有效期"],
+    )
+    .and_then(|value| normalized_membership_date(&value));
+    let expired = status
+        .as_deref()
+        .is_some_and(is_explicit_expired_membership)
+        || expires_at
+            .as_deref()
+            .is_some_and(membership_date_has_passed);
+    let state = match status.as_deref() {
+        _ if expired => "free",
+        Some(value) if is_explicit_free_membership(value) => "free",
+        Some(value) if is_explicit_vip_membership(value) => "vip",
+        _ => "unknown",
+    };
+    let display_name = if expired {
+        "会员已过期".to_owned()
+    } else {
+        status.unwrap_or_else(|| match state {
+            "vip" => "会员用户".to_owned(),
+            "free" => "免费用户".to_owned(),
+            _ => "会员状态未知".to_owned(),
+        })
+    };
+    let reason = match (state, expired) {
+        (_, true) => "蓝奏云个人页返回的会员状态或到期日期表明会员已过期",
+        ("vip", false) => "蓝奏云个人页返回了明确的会员状态标签",
+        ("free", false) => "蓝奏云个人页返回了明确的免费或未开通会员标签",
+        _ => "蓝奏云个人页未返回可确认的会员状态标签",
+    };
+
+    let mut profile = serde_json::Map::new();
+    profile.insert("state".to_owned(), Value::String(state.to_owned()));
+    profile.insert("displayName".to_owned(), Value::String(display_name));
+    if let Some(level) = level {
+        profile.insert("level".to_owned(), Value::String(level));
+    }
+    if let Some(expires_at) = expires_at {
+        profile.insert("expiresAt".to_owned(), Value::String(expires_at));
+    }
+    profile.insert("reason".to_owned(), Value::String(reason.to_owned()));
+    Value::Object(profile)
+}
+
+fn is_explicit_free_membership(value: &str) -> bool {
+    [
+        "非会员",
+        "免费用户",
+        "普通用户",
+        "未开通",
+        "免费版",
+        "无会员",
+    ]
+    .iter()
+    .any(|marker| value.contains(marker))
+}
+
+fn is_explicit_expired_membership(value: &str) -> bool {
+    [
+        "会员已过期",
+        "会员过期",
+        "已到期会员",
+        "过期会员",
+        "VIP已过期",
+    ]
+    .iter()
+    .any(|marker| {
+        value
+            .to_ascii_uppercase()
+            .contains(&marker.to_ascii_uppercase())
+    })
+}
+
+fn is_explicit_vip_membership(value: &str) -> bool {
+    !is_explicit_expired_membership(value)
+        && !is_explicit_free_membership(value)
+        && (value.to_ascii_uppercase().contains("VIP") || value.contains("会员"))
+}
+
+static MEMBERSHIP_DATE_PATTERN: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(
+        r#"(?x)
+        (?P<year>\d{4})
+        (?:-|/|\.|年)
+        (?P<month>\d{1,2})
+        (?:-|/|\.|月)
+        (?P<day>\d{1,2})
+        日?
+        "#,
+    )
+    .expect("membership date regex must be valid")
+});
+
+fn normalized_membership_date(value: &str) -> Option<String> {
+    let captures = MEMBERSHIP_DATE_PATTERN.captures(value)?;
+    let year = captures.name("year")?.as_str().parse::<u32>().ok()?;
+    let month = captures.name("month")?.as_str().parse::<u32>().ok()?;
+    let day = captures.name("day")?.as_str().parse::<u32>().ok()?;
+    let max_day = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if year % 400 == 0 || (year % 4 == 0 && year % 100 != 0) => 29,
+        2 => 28,
+        _ => return None,
+    };
+    if day == 0 || day > max_day {
+        return None;
+    }
+    Some(format!("{year:04}-{month:02}-{day:02}"))
+}
+
+fn membership_date_has_passed(value: &str) -> bool {
+    let Some(expiry_days) = unix_days_from_iso_date(value) else {
+        return false;
+    };
+    let Some(today_days) = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|duration| (duration.as_secs() / 86_400) as i64)
+    else {
+        return false;
+    };
+    expiry_days < today_days
+}
+
+fn unix_days_from_iso_date(value: &str) -> Option<i64> {
+    let mut parts = value.split('-');
+    let year = parts.next()?.parse::<i64>().ok()?;
+    let month = parts.next()?.parse::<i64>().ok()?;
+    let day = parts.next()?.parse::<i64>().ok()?;
+    if parts.next().is_some() || !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    let adjusted_year = year - i64::from(month <= 2);
+    let era = if adjusted_year >= 0 {
+        adjusted_year
+    } else {
+        adjusted_year - 399
+    } / 400;
+    let year_of_era = adjusted_year - era * 400;
+    let adjusted_month = month + if month > 2 { -3 } else { 9 };
+    let day_of_year = (153 * adjusted_month + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    Some(era * 146_097 + day_of_era - 719_468)
+}
+
+fn account_entries(visible: &str) -> Vec<Value> {
+    [
+        (
+            "permissions",
+            "我的权限",
+            "查看账号权限与用量",
+            ACCOUNT_PORTAL_URL,
+            false,
+            false,
+        ),
+        (
+            "balance",
+            "财务充值",
+            "查看余额并在官方页面确认充值",
+            "https://pc.woozooo.com/mydisk.php?item=profile&action=goods",
+            true,
+            false,
+        ),
+        (
+            "fileUpgrade",
+            "文件升级",
+            "查看单文件升级服务",
+            "https://pc.woozooo.com/mydisk.php?item=profile&action=buygoods",
+            true,
+            false,
+        ),
+        (
+            "downloadCashout",
+            "下载提现",
+            "进入官方下载提现页面",
+            "https://pc.woozooo.com/mydisk.php?item=profile&action=exchange",
+            true,
+            false,
+        ),
+        (
+            "cashoutRecords",
+            "提现记录",
+            "查看官方下载提现记录",
+            "https://pc.woozooo.com/mydisk.php?item=profile&action=orders",
+            false,
+            false,
+        ),
+        (
+            "invite",
+            "邀请注册",
+            "查看官方邀请入口",
+            "https://pc.woozooo.com/mydisk.php?item=buddy&action=invite",
+            false,
+            false,
+        ),
+        (
+            "password",
+            "密码修改",
+            "在官方页面验证并修改账号密码",
+            "https://pc.woozooo.com/mydisk.php?item=profile&action=password",
+            true,
+            false,
+        ),
+        (
+            "phone",
+            "手机号",
+            "在官方页面验证并更换手机号",
+            ACCOUNT_PORTAL_URL,
+            true,
+            false,
+        ),
+        (
+            "closeAccount",
+            "注销账户",
+            "注销后账号与数据可能无法恢复",
+            ACCOUNT_PORTAL_URL,
+            true,
+            true,
+        ),
+    ]
+    .into_iter()
+    .map(
+        |(id, title, description, portal_url, confirmation, dangerous)| {
+            json!({
+                "id": id,
+                "title": title,
+                "description": description,
+                "portalUrl": portal_url,
+                "available": visible.contains(title),
+                "requiresOfficialConfirmation": confirmation,
+                "dangerous": dangerous,
+            })
+        },
+    )
+    .collect()
+}
+
+fn account_facts(document: &Html) -> Vec<Value> {
+    [
+        ("singleFileLimit", "单个文件大小"),
+        ("storageStatistics", "云存储统计"),
+        ("downloadWithoutLogin", "下载免登录"),
+        ("downloadSpeed", "下载速度"),
+        ("downloadCount", "下载次数"),
+        ("downloadTraffic", "下载流量"),
+        ("storageCapacity", "存储空间"),
+        ("allowedUploadTypes", "允许上传类型"),
+    ]
+    .into_iter()
+    .map(|(id, label)| {
+        let value = structured_value(document, &[label]);
+        let mut fact = serde_json::Map::new();
+        fact.insert("id".to_owned(), Value::String(id.to_owned()));
+        fact.insert("label".to_owned(), Value::String(label.to_owned()));
+        fact.insert("known".to_owned(), Value::Bool(value.is_some()));
+        if let Some(value) = value {
+            fact.insert("value".to_owned(), Value::String(value));
+        }
+        Value::Object(fact)
+    })
+    .collect()
+}
+
+fn membership_plans(document: &Html) -> Vec<Value> {
+    [
+        ("month1", "1个月", &["1个月", "1月"][..]),
+        ("month2", "2个月", &["2个月", "2月"][..]),
+        ("month6", "6个月", &["6个月", "6月"][..]),
+        ("year1", "1年", &["1年", "12个月"][..]),
+        ("monthly", "包月", &["包月"][..]),
+        ("yearly", "包年", &["包年"][..]),
+        ("downloadPack", "下载包", &["下载包"][..]),
+    ]
+    .into_iter()
+    .map(|(id, label, aliases)| {
+        let candidate = plan_candidate(document, aliases);
+        let available = candidate.is_some();
+        let price_label = candidate.as_deref().and_then(extract_price);
+        let discount = candidate.as_deref().and_then(extract_discount);
+        let detail = discount
+            .map(|discount| format!("官方页面标注 {discount}"))
+            .unwrap_or_else(|| "价格与权益以蓝奏云官方页面实时信息为准".to_owned());
+        let mut plan = serde_json::Map::new();
+        plan.insert("id".to_owned(), Value::String(id.to_owned()));
+        plan.insert("label".to_owned(), Value::String(label.to_owned()));
+        plan.insert("detail".to_owned(), Value::String(detail));
+        if let Some(price_label) = price_label {
+            plan.insert("priceLabel".to_owned(), Value::String(price_label));
+        }
+        plan.insert("available".to_owned(), Value::Bool(available));
+        Value::Object(plan)
+    })
+    .collect()
+}
+
+fn personalization_features(visible: &str) -> Vec<Value> {
+    [
+        ("adFreeDownloads", "免广告下载", "会员下载页可免除广告等待"),
+        (
+            "uploadTimeVisibility",
+            "上传时间隐藏/显示",
+            "控制分享页上传时间显示",
+        ),
+        ("subfolders", "子文件夹", "使用分享目录中的子文件夹"),
+        ("search", "搜索", "使用会员搜索能力"),
+        (
+            "defaultFilePassword",
+            "新文件密码默认开关",
+            "控制新上传文件的默认密码状态",
+        ),
+        ("avatarUpload", "头像上传", "设置账号头像"),
+        ("downloadPageTemplate", "下载页模板", "选择官方下载页模板"),
+        ("publisherNickname", "发布者昵称", "设置分享页发布者昵称"),
+        ("dailyDownloadReport", "日下载报表", "查看每日下载统计报表"),
+        ("fileRetention", "文件保存时间", "查看会员文件保存期限权益"),
+        ("directLinkDomain", "直链域名绑定", "配置直链域名及备案信息"),
+    ]
+    .into_iter()
+    .map(|(id, title, description)| {
+        let available = visible.contains(title);
+        json!({
+            "id": id,
+            "title": title,
+            "description": description,
+            "available": available,
+            "writable": false,
+            "reason": if available {
+                "蓝奏云会员页当前展示该功能；设置仍需在官方页面确认"
+            } else {
+                "蓝奏云会员页未明确展示该功能，可能受页面改版或账号状态影响"
+            },
+        })
+    })
+    .collect()
+}
+
+fn visible_text(document: &Html) -> String {
+    let all = static_selector("*");
+    document
+        .select(&all)
+        .filter(|element| {
+            !matches!(
+                element.value().name(),
+                "script" | "style" | "noscript" | "template"
+            )
+        })
+        .flat_map(|element| {
+            element
+                .children()
+                .filter_map(|node| node.value().as_text())
+                .map(|text| text.to_string())
+                .collect::<Vec<_>>()
+        })
+        .map(|text| normalize_html_text(&text))
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn structured_value(document: &Html, labels: &[&str]) -> Option<String> {
+    let row_selector = static_selector("tr");
+    let cell_selector = static_selector("th, td");
+    for row in document.select(&row_selector) {
+        let cells = row
+            .select(&cell_selector)
+            .map(element_text)
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>();
+        for (index, cell) in cells.iter().enumerate() {
+            for label in labels {
+                if normalized_label(cell) == normalized_label(label) {
+                    if let Some(value) = cells.get(index + 1).and_then(|value| public_value(value))
+                    {
+                        return Some(value);
+                    }
+                }
+                if let Some(value) = inline_labeled_value(cell, label) {
+                    return public_value(&value);
+                }
+            }
+        }
+    }
+
+    let definition_selector = static_selector("dl");
+    let term_selector = static_selector("dt, dd");
+    for list in document.select(&definition_selector) {
+        let terms = list
+            .select(&term_selector)
+            .map(element_text)
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>();
+        for pair in terms.windows(2) {
+            if labels
+                .iter()
+                .any(|label| normalized_label(&pair[0]) == normalized_label(label))
+            {
+                if let Some(value) = public_value(&pair[1]) {
+                    return Some(value);
+                }
+            }
+        }
+    }
+
+    let labeled_selector = static_selector("[data-label]");
+    for element in document.select(&labeled_selector) {
+        let label = element.value().attr("data-label").unwrap_or_default();
+        if labels
+            .iter()
+            .any(|candidate| normalized_label(label) == normalized_label(candidate))
+        {
+            if let Some(value) = public_value(&element_text(element)) {
+                return Some(value);
+            }
+        }
+    }
+
+    let inline_selector = static_selector("li, p, div, span");
+    for element in document.select(&inline_selector) {
+        let text = element_text(element);
+        if text.chars().count() > 160 {
+            continue;
+        }
+        for label in labels {
+            if let Some(value) = inline_labeled_value(&text, label) {
+                if let Some(value) = public_value(&value) {
+                    return Some(value);
+                }
+            }
+        }
+    }
+    None
+}
+
+fn inline_labeled_value(text: &str, label: &str) -> Option<String> {
+    let text = text.trim();
+    let suffix = text.strip_prefix(label)?.trim_start();
+    let value = suffix
+        .strip_prefix('：')
+        .or_else(|| suffix.strip_prefix(':'))?
+        .trim();
+    (!value.is_empty()).then(|| value.to_owned())
+}
+
+fn plan_candidate(document: &Html, aliases: &[&str]) -> Option<String> {
+    let selector = static_selector("tr, li, option, label, button, a, div");
+    document
+        .select(&selector)
+        .filter_map(|element| {
+            let text = element_text(element);
+            let attributes = [
+                element.value().attr("class").unwrap_or_default(),
+                element.value().attr("id").unwrap_or_default(),
+                element.value().attr("name").unwrap_or_default(),
+            ]
+            .join(" ")
+            .to_ascii_lowercase();
+            let named_plan_element = ["plan", "vip", "price", "month", "year", "goods"]
+                .iter()
+                .any(|marker| attributes.contains(marker));
+            let explicit_plan_context = [
+                "购买",
+                "套餐",
+                "续费",
+                "开通",
+                "升级",
+                "包月",
+                "包年",
+                "下载包",
+            ]
+            .iter()
+            .any(|marker| text.contains(marker));
+            let has_commercial_detail =
+                extract_price(&text).is_some() || extract_discount(&text).is_some();
+            (!text.is_empty()
+                && text.chars().count() <= 160
+                && aliases
+                    .iter()
+                    .any(|alias| contains_plan_alias(&text, alias))
+                && (named_plan_element
+                    || explicit_plan_context
+                    || has_commercial_detail
+                    || element.value().name() == "option")
+                && !plan_is_unavailable(element, &text)
+                && public_value(&text).is_some())
+            .then_some(text)
+        })
+        .min_by_key(|text| text.chars().count())
+}
+
+fn contains_plan_alias(text: &str, alias: &str) -> bool {
+    text.match_indices(alias).any(|(index, _)| {
+        let before = text[..index].chars().next_back();
+        let after = text[index + alias.len()..].chars().next();
+        let starts_with_digit = alias
+            .chars()
+            .next()
+            .is_some_and(|value| value.is_ascii_digit());
+        let ends_with_digit = alias
+            .chars()
+            .next_back()
+            .is_some_and(|value| value.is_ascii_digit());
+        !(starts_with_digit && before.is_some_and(|value| value.is_ascii_digit()))
+            && !(ends_with_digit && after.is_some_and(|value| value.is_ascii_digit()))
+    })
+}
+
+fn plan_is_unavailable(element: ElementRef<'_>, text: &str) -> bool {
+    let class = element
+        .value()
+        .attr("class")
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    element.value().attr("disabled").is_some()
+        || element.value().attr("aria-disabled") == Some("true")
+        || ["disabled", "unavailable", "soldout", "offline"]
+            .iter()
+            .any(|marker| class.contains(marker))
+        || [
+            "已下架",
+            "已停售",
+            "停止销售",
+            "暂停销售",
+            "已售罄",
+            "暂未开放",
+            "不可购买",
+        ]
+        .iter()
+        .any(|marker| text.contains(marker))
+}
+
+static PRICE_PATTERN: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r#"(?:￥|¥)\s*\d+(?:\.\d{1,2})?|\d+(?:\.\d{1,2})?\s*元"#)
+        .expect("price regex must be valid")
+});
+
+fn extract_price(text: &str) -> Option<String> {
+    PRICE_PATTERN
+        .find(text)
+        .map(|value| value.as_str().replace(' ', ""))
+}
+
+static DISCOUNT_PATTERN: Lazy<Regex> =
+    Lazy::new(|| Regex::new(r#"\d+(?:\.\d+)?\s*折"#).expect("discount regex must be valid"));
+
+fn extract_discount(text: &str) -> Option<String> {
+    DISCOUNT_PATTERN
+        .find(text)
+        .map(|value| value.as_str().replace(' ', ""))
+}
+
+fn element_text(element: ElementRef<'_>) -> String {
+    normalize_html_text(&element.text().collect::<Vec<_>>().join(" "))
+}
+
+fn normalize_html_text(value: &str) -> String {
+    value
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim_matches(&['：', ':', ' ', '\t', '\r', '\n'][..])
+        .to_owned()
+}
+
+fn normalized_label(value: &str) -> String {
+    normalize_html_text(value).replace(' ', "")
+}
+
+fn public_value(value: &str) -> Option<String> {
+    let value = normalize_html_text(value);
+    if value.is_empty() || value.chars().count() > 160 {
+        return None;
+    }
+    let lower = value.to_ascii_lowercase();
+    if [
+        "cookie",
+        "set-cookie",
+        "formhash",
+        "token",
+        "password",
+        "passwd",
+        "session",
+        "authorization",
+        "bearer",
+    ]
+    .iter()
+    .any(|marker| lower.contains(marker))
+    {
+        return None;
+    }
+    Some(value)
+}
+
+fn static_selector(value: &str) -> Selector {
+    Selector::parse(value).expect("static HTML selector must be valid")
 }
 
 pub fn js_data_fields(html: &str) -> CoreResult<BTreeMap<String, String>> {
@@ -467,7 +1114,10 @@ mod tests {
 
     #[test]
     fn test_ensure_session_html_maps_login_page_to_expired() {
-        let error = ensure_session_html("<title>用户登录</title>网盘用户登录").unwrap_err();
+        let error = ensure_session_html(
+            "<title>\n  用户 登录 \n</title><form><input type=password></form>",
+        )
+        .unwrap_err();
         assert_eq!(error.code, "session_expired");
     }
 
@@ -619,5 +1269,163 @@ mod tests {
         assert!(items.iter().all(|item| item.is_recycle));
         assert_eq!(items[0].id, "42");
         assert_eq!(items[1].name, "report.txt");
+    }
+
+    #[test]
+    fn test_account_surface_parses_vip_profile_plans_and_public_facts() {
+        let mypower = r#"
+          <html><body>
+            <nav>
+              <a>我的权限</a><a>财务充值</a><a>文件升级</a><a>下载提现</a>
+              <a>提现记录</a><a>邀请注册</a>
+            </nav>
+            <table>
+              <tr><th>会员状态</th><td>VIP会员</td></tr>
+              <tr><th>会员等级</th><td>VIP 2</td></tr>
+              <tr><th>会员到期</th><td>2099年8月1日</td></tr>
+              <tr><th>存储空间</th><td>3 TB</td></tr>
+              <tr><th>单个文件大小</th><td>220 MB</td></tr>
+            </table>
+            <section>密码修改 手机号 注销账户</section>
+          </body></html>
+        "#;
+        let huiyuan = r#"
+          <html><body>
+            <div class="plan">1个月 ￥12</div>
+            <div class="plan">2个月 20元</div>
+            <div class="plan">6个月 9折 ￥54</div>
+            <div class="plan">1年 8折 96元</div>
+            <div>包月 包年 下载包</div>
+            <ul><li>免广告下载</li><li>搜索</li><li>直链域名绑定</li></ul>
+          </body></html>
+        "#;
+
+        let value = account_surface(mypower, huiyuan).unwrap();
+
+        assert_eq!(value["membershipProfile"]["state"], "vip");
+        assert_eq!(value["membershipProfile"]["level"], "VIP 2");
+        assert_eq!(value["membershipProfile"]["expiresAt"], "2099-08-01");
+        assert!(value["facts"].as_array().unwrap().iter().any(|fact| {
+            fact["id"] == "storageCapacity" && fact["known"] == true && fact["value"] == "3 TB"
+        }));
+        assert!(value["plans"].as_array().unwrap().iter().any(|plan| {
+            plan["id"] == "month6"
+                && plan["priceLabel"] == "￥54"
+                && plan["detail"].as_str().unwrap().contains("9折")
+        }));
+    }
+
+    #[test]
+    fn test_account_surface_distinguishes_free_and_unknown_without_purchase_inference() {
+        let free = account_surface(
+            "<table><tr><th>账号级别</th><td>免费用户</td></tr></table>",
+            "<div>会员增值服务 包月 包年 下载包</div>",
+        )
+        .unwrap();
+        assert_eq!(free["membershipProfile"]["state"], "free");
+
+        let unknown = account_surface(
+            "<div>我的权限 财务充值 文件升级 下载提现 提现记录 邀请注册 密码修改 手机号 注销账户</div>",
+            "<div>购买会员 会员增值服务 1个月 10元 包月 包年 下载包</div>",
+        )
+        .unwrap();
+        assert_eq!(unknown["membershipProfile"]["state"], "unknown");
+    }
+
+    #[test]
+    fn test_account_surface_marks_expired_membership_as_free() {
+        let expired_by_date = account_surface(
+            "<table><tr><th>会员状态</th><td>VIP会员</td></tr><tr><th>会员到期</th><td>2000-01-01</td></tr></table>",
+            "<div>会员增值服务</div>",
+        )
+        .unwrap();
+        assert_eq!(expired_by_date["membershipProfile"]["state"], "free");
+        assert_eq!(
+            expired_by_date["membershipProfile"]["displayName"],
+            "会员已过期"
+        );
+
+        let expired_by_label = account_surface(
+            "<table><tr><th>会员状态</th><td>VIP会员已过期</td></tr></table>",
+            "<div>会员增值服务</div>",
+        )
+        .unwrap();
+        assert_eq!(expired_by_label["membershipProfile"]["state"], "free");
+    }
+
+    #[test]
+    fn test_membership_plans_reject_numeric_substrings_and_unavailable_offers() {
+        let value = account_surface(
+            "<table><tr><th>账号级别</th><td>免费用户</td></tr></table>",
+            r#"
+              <div class="plan">11月套餐 ￥110</div>
+              <button class="plan" disabled>1个月套餐 ￥10</button>
+              <div class="plan">2个月套餐已下架 ￥18</div>
+              <div class="plan">6个月套餐 ￥48</div>
+            "#,
+        )
+        .unwrap();
+        let plans = value["plans"].as_array().unwrap();
+        let availability = |id: &str| {
+            plans.iter().find(|plan| plan["id"] == id).unwrap()["available"]
+                .as_bool()
+                .unwrap()
+        };
+        assert!(!availability("month1"));
+        assert!(!availability("month2"));
+        assert!(availability("month6"));
+    }
+
+    #[test]
+    fn test_account_surface_returns_all_entry_and_personalization_ids_without_secrets() {
+        let mypower = r#"
+          <nav>我的权限 财务充值 文件升级 下载提现 提现记录 邀请注册</nav>
+          <div>密码修改 手机号 注销账户</div>
+          <table>
+            <tr><th>云存储统计</th><td>cookie=private</td></tr>
+            <tr><th>下载速度</th><td>高速</td></tr>
+          </table>
+          <input name="formhash" value="private-formhash">
+        "#;
+        let huiyuan = r#"
+          <div>
+            免广告下载 上传时间隐藏/显示 子文件夹 搜索 新文件密码默认开关
+            头像上传 下载页模板 发布者昵称 日下载报表 文件保存时间 直链域名绑定
+          </div>
+          <script>var token='private-token';</script>
+        "#;
+
+        let value = account_surface(mypower, huiyuan).unwrap();
+        let entry_ids = value["entries"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["id"].as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            entry_ids,
+            [
+                "permissions",
+                "balance",
+                "fileUpgrade",
+                "downloadCashout",
+                "cashoutRecords",
+                "invite",
+                "password",
+                "phone",
+                "closeAccount",
+            ]
+        );
+        assert_eq!(value["personalization"].as_array().unwrap().len(), 11);
+        assert!(value["personalization"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|item| item["writable"] == false));
+        let serialized = value.to_string().to_ascii_lowercase();
+        assert!(!serialized.contains("private"));
+        assert!(!serialized.contains("formhash"));
+        assert!(!serialized.contains("token"));
+        assert!(!serialized.contains("cookie"));
     }
 }

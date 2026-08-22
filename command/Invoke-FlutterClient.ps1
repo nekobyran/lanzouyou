@@ -94,6 +94,7 @@ $windowsExeName = 'lanzouyou.exe'
 $script:flutterCommand = $null
 $script:androidSdk = $null
 $script:cargoCommand = $null
+$script:rustToolchain = $null
 $script:windowsToolchain = $null
 
 if (-not (Test-Path -LiteralPath $flutterProject -PathType Container)) {
@@ -215,6 +216,49 @@ function Resolve-CargoCommand {
     return $resolved
 }
 
+function Resolve-RustToolchain {
+    $toolchainsRoot = Join-Path $env:RUSTUP_HOME 'toolchains'
+    if (-not (Test-Path -LiteralPath $toolchainsRoot -PathType Container)) {
+        throw "Rust toolchains directory is missing: $toolchainsRoot"
+    }
+    $directories = @(
+        Get-ChildItem -LiteralPath $toolchainsRoot -Directory -ErrorAction Stop |
+            Sort-Object @{ Expression = { if ($_.Name -like 'stable-*') { 0 } else { 1 } } }, Name
+    )
+    foreach ($directory in $directories) {
+        $rustc = Join-Path $directory.FullName 'bin\rustc.exe'
+        $rustdoc = Join-Path $directory.FullName 'bin\rustdoc.exe'
+        if (-not (Test-Path -LiteralPath $rustc -PathType Leaf) -or
+            -not (Test-Path -LiteralPath $rustdoc -PathType Leaf)) {
+            continue
+        }
+        $rustlibRoot = Join-Path $directory.FullName 'lib\rustlib'
+        $hostDirectory = Get-ChildItem -LiteralPath $rustlibRoot -Directory -ErrorAction SilentlyContinue |
+            Where-Object {
+                $_.Name -match 'windows' -and
+                (Test-Path -LiteralPath (Join-Path $_.FullName 'lib') -PathType Container)
+            } |
+            Sort-Object Name |
+            Select-Object -First 1
+        if (-not $hostDirectory) {
+            continue
+        }
+        $hostTuple = $hostDirectory.Name
+        $hostLib = Join-Path $hostDirectory.FullName 'lib'
+        if (-not (Test-Path -LiteralPath $hostLib -PathType Container)) {
+            continue
+        }
+        return [pscustomobject]@{
+            Root = $directory.FullName
+            Bin = Join-Path $directory.FullName 'bin'
+            Rustc = $rustc
+            Rustdoc = $rustdoc
+            Host = $hostTuple
+        }
+    }
+    throw "No complete Rust toolchain was found under $toolchainsRoot"
+}
+
 function Set-JavaEnvironment {
     $resolvedJavaHome = if ($JavaHome) { $JavaHome } else { $defaultJavaHome }
     if (-not (Test-Path -LiteralPath (Join-Path $resolvedJavaHome 'bin\java.exe') -PathType Leaf)) {
@@ -258,6 +302,8 @@ function Set-BuildCacheEnvironment {
     $env:TMPDIR = $resolvedTemp
     $env:ANDROID_USER_HOME = Resolve-BuildCacheDirectory `
         -DefaultPath $defaultAndroidUserHome -DisplayName 'ANDROID_USER_HOME'
+    $env:LOCALAPPDATA = Resolve-BuildCacheDirectory `
+        -DefaultPath (Join-Path $standardSdkRoot 'cache\localappdata') -DisplayName 'LOCALAPPDATA'
     $cargoTarget = [IO.Path]::GetFullPath($defaultCargoTargetDir)
     $projectPrefix = $projectRoot.TrimEnd('\') + '\'
     if (-not $cargoTarget.StartsWith($projectPrefix, [StringComparison]::OrdinalIgnoreCase)) {
@@ -293,24 +339,26 @@ function Sync-AndroidLocalProperties {
 }
 
 function Sync-FlutterToolConfiguration {
-    $output = @(& $script:flutterCommand config `
-        --jdk-dir $env:JAVA_HOME `
-        --android-sdk $script:androidSdk 2>&1 | ForEach-Object { "$_" })
-    if ($LASTEXITCODE -ne 0) {
-        throw "Flutter SDK/JDK configuration sync failed: $($output -join ' ')"
-    }
+    $syncResult = Invoke-FlutterChecked -Arguments @(
+        'config',
+        '--jdk-dir', $env:JAVA_HOME,
+        '--android-sdk', $script:androidSdk
+    ) -FailureMessage 'Flutter SDK/JDK configuration sync failed.' -CaptureOutput
+    $output = @(($syncResult.StdOut, $syncResult.StdErr) -join "`n" -split "`r?`n" |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
 
-    $settings = @(& $script:flutterCommand config --list 2>&1 | ForEach-Object { "$_" })
-    if ($LASTEXITCODE -ne 0) {
-        throw 'Flutter configuration verification failed.'
-    }
+    $settingsResult = Invoke-FlutterChecked -Arguments @('config', '--list') `
+        -FailureMessage 'Flutter configuration verification failed.' -CaptureOutput
+    $settings = @((($settingsResult.StdOut, $settingsResult.StdErr) -join "`n") -split "`r?`n" |
+        ForEach-Object { "$_" } |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
     $androidSetting = @($settings | Where-Object { $_ -match '^\s*android-sdk:' })
     $javaSetting = @($settings | Where-Object { $_ -match '^\s*jdk-dir:' })
     if ($androidSetting.Count -ne 1 -or
         $androidSetting[0].Trim() -cne "android-sdk: $script:androidSdk" -or
         $javaSetting.Count -ne 1 -or
         $javaSetting[0].Trim() -cne "jdk-dir: $env:JAVA_HOME") {
-        throw 'Flutter persisted Android SDK/JDK configuration is not canonical.'
+        throw "Flutter persisted Android SDK/JDK configuration is not canonical. Output=$($output -join ' '; $settings -join ' ')"
     }
     Write-Host 'FlutterToolConfiguration: canonical'
 }
@@ -325,6 +373,10 @@ function Initialize-Tools {
     $script:cargoCommand = Resolve-CargoCommand
     $env:CARGO = $script:cargoCommand
     Add-PathEntry -Path (Split-Path -Parent $script:cargoCommand)
+    $script:rustToolchain = Resolve-RustToolchain
+    $env:RUSTC = $script:rustToolchain.Rustc
+    $env:RUSTDOC = $script:rustToolchain.Rustdoc
+    Add-PathEntry -Path $script:rustToolchain.Bin
     Set-JavaEnvironment
     if (-not (Test-Path -LiteralPath (Join-Path $defaultCmakeHome 'bin\cmake.exe') -PathType Leaf)) {
         throw "Canonical CMake is missing: $defaultCmakeHome"
@@ -342,6 +394,7 @@ function Initialize-Tools {
     Write-Host "SdkRoot: $standardSdkRoot"
     Write-Host "FlutterCommand: $script:flutterCommand"
     Write-Host "CargoCommand: $script:cargoCommand"
+    Write-Host "RustcCommand: $($script:rustToolchain.Rustc)"
     if ($RequireAndroid) {
         Write-Host "AndroidSdk: $script:androidSdk"
     }
@@ -379,24 +432,26 @@ function Invoke-VersionProbe {
 function Invoke-EnvironmentCheck {
     $flutterSdk = Split-Path -Parent (Split-Path -Parent $script:flutterCommand)
     $dart = Join-Path $flutterSdk 'bin\cache\dart-sdk\bin\dart.exe'
-    $rustup = Join-Path (Split-Path -Parent $script:cargoCommand) 'rustup.exe'
     $java = Join-Path $env:JAVA_HOME 'bin\java.exe'
     $adb = Join-Path $script:androidSdk 'platform-tools\adb.exe'
 
     $flutterVersion = Invoke-VersionProbe -Label 'Flutter' -FilePath $script:flutterCommand -Arguments @('--version')
     $dartVersion = Invoke-VersionProbe -Label 'Dart' -FilePath $dart -Arguments @('--version')
     $cargoVersion = Invoke-VersionProbe -Label 'Cargo' -FilePath $script:cargoCommand -Arguments @('--version')
-    $rustupVersion = Invoke-VersionProbe -Label 'Rustup' -FilePath $rustup -Arguments @('show', 'active-toolchain')
+    $rustcVersion = Invoke-VersionProbe -Label 'Rustc' -FilePath $script:rustToolchain.Rustc -Arguments @('--version')
     $javaVersion = Invoke-VersionProbe -Label 'Java' -FilePath $java -Arguments @('-version')
     $adbVersion = Invoke-VersionProbe -Label 'Adb' -FilePath $adb -Arguments @('version')
     if ($cargoVersion -notmatch '^cargo\s+\d') {
         throw "Cargo proxy identity check failed: $cargoVersion"
     }
+    if ($rustcVersion -notmatch '^rustc\s+\d') {
+        throw "Rustc identity check failed: $rustcVersion"
+    }
 
     Write-Host "SdkRootPhysical: $(Assert-UnderCanonicalSdkRoot -Path $standardSdkRoot -DisplayName 'SDK root' -ReturnPhysical)"
     Write-Host "FlutterPhysical: $(Assert-UnderCanonicalSdkRoot -Path $script:flutterCommand -DisplayName 'Flutter' -ReturnPhysical)"
     Write-Host "CargoPhysical: $(Assert-UnderCanonicalSdkRoot -Path $script:cargoCommand -DisplayName 'Cargo' -ReturnPhysical)"
-    Write-Host "RustupPhysical: $(Assert-UnderCanonicalSdkRoot -Path $rustup -DisplayName 'Rustup' -ReturnPhysical)"
+    Write-Host "RustcPhysical: $(Assert-UnderCanonicalSdkRoot -Path $script:rustToolchain.Rustc -DisplayName 'Rustc' -ReturnPhysical)"
     Write-Host "JavaPhysical: $(Assert-UnderCanonicalSdkRoot -Path $java -DisplayName 'Java' -ReturnPhysical)"
     Write-Host "AdbPhysical: $(Assert-UnderCanonicalSdkRoot -Path $adb -DisplayName 'Adb' -ReturnPhysical)"
 }
@@ -751,21 +806,36 @@ function Invoke-WindowsToolchainPreflight {
 
 function Ensure-AndroidRustTargets {
     $targets = @('aarch64-linux-android', 'x86_64-linux-android')
+    $missing = @(
+        foreach ($target in $targets) {
+            $targetLib = Join-Path $script:rustToolchain.Root "lib\rustlib\$target\lib"
+            $hasStandardLibrary = (Test-Path -LiteralPath $targetLib -PathType Container) -and
+                (@(Get-ChildItem -LiteralPath $targetLib -Filter 'libstd-*.rlib' -File -ErrorAction SilentlyContinue).Count -gt 0)
+            if (-not $hasStandardLibrary) {
+                $target
+            }
+        }
+    )
+    if ($missing.Count -eq 0) {
+        Write-Host "AndroidRustTargets: $($targets -join ', ')"
+        return
+    }
+
     $rustup = Join-Path (Split-Path -Parent $script:cargoCommand) 'rustup.exe'
     if (-not (Test-Path -LiteralPath $rustup -PathType Leaf)) {
-        throw "rustup is missing next to canonical Cargo: $rustup"
+        throw "Rust targets are missing ($($missing -join ', ')) and rustup is unavailable: $rustup"
     }
-    $installed = @(& $rustup target list --installed)
-    if ($LASTEXITCODE -ne 0) {
-        throw 'rustup target list failed.'
+    $rustupIdentity = @(& $rustup --version 2>&1 | ForEach-Object { "$_" }) |
+        Where-Object { -not [string]::IsNullOrWhiteSpace($_) } |
+        Select-Object -First 1
+    if ($LASTEXITCODE -ne 0 -or $rustupIdentity -notmatch '^rustup\s+\d') {
+        throw "Rust targets are missing ($($missing -join ', ')) and the canonical rustup executable is invalid."
     }
-    foreach ($target in $targets) {
-        if ($installed -notcontains $target) {
-            Write-Step -Message "Install Rust target $target."
-            & $rustup target add $target
-            if ($LASTEXITCODE -ne 0) {
-                throw "Failed to install Rust target: $target"
-            }
+    foreach ($target in $missing) {
+        Write-Step -Message "Install Rust target $target."
+        & $rustup target add $target
+        if ($LASTEXITCODE -ne 0) {
+            throw "Failed to install Rust target: $target"
         }
     }
 }
@@ -773,11 +843,67 @@ function Ensure-AndroidRustTargets {
 function Invoke-FlutterChecked {
     param(
         [Parameter(Mandatory = $true)][string[]]$Arguments,
-        [string]$FailureMessage = 'Flutter command failed.'
+        [string]$FailureMessage = 'Flutter command failed.',
+        [switch]$CaptureOutput
     )
-    & $script:flutterCommand @Arguments @FlutterArgs
-    if ($LASTEXITCODE -ne 0) {
-        throw "$FailureMessage ExitCode=$LASTEXITCODE"
+    $commandLine = @($Arguments) + @($FlutterArgs)
+    $resolvedFlutter = [IO.Path]::GetFullPath($script:flutterCommand)
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    if ([IO.Path]::GetExtension($resolvedFlutter) -in @('.cmd', '.bat')) {
+        $startInfo.FileName = Join-Path ([Environment]::SystemDirectory) 'cmd.exe'
+        [void]$startInfo.ArgumentList.Add('/d')
+        [void]$startInfo.ArgumentList.Add('/s')
+        [void]$startInfo.ArgumentList.Add('/c')
+        [void]$startInfo.ArgumentList.Add($resolvedFlutter)
+    } else {
+        $startInfo.FileName = $resolvedFlutter
+    }
+    foreach ($argument in $commandLine) { [void]$startInfo.ArgumentList.Add([string]$argument) }
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = [bool]$CaptureOutput
+    $startInfo.WorkingDirectory = (Get-Location).Path
+    if ($CaptureOutput) {
+        $startInfo.RedirectStandardOutput = $true
+        $startInfo.RedirectStandardError = $true
+    }
+    $childPath = [Collections.Generic.List[string]]::new()
+    foreach ($candidate in @([Environment]::SystemDirectory, (Join-Path $env:SystemRoot 'System32'))) {
+        if (-not [string]::IsNullOrWhiteSpace($candidate) -and (Test-Path -LiteralPath $candidate -PathType Container)) {
+            $childPath.Add([IO.Path]::GetFullPath($candidate))
+        }
+    }
+    $gitCommand = Get-Command git.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($gitCommand) { $childPath.Add((Split-Path -Parent $gitCommand.Source)) }
+    $pwshCommand = Get-Command pwsh.exe -ErrorAction SilentlyContinue | Select-Object -First 1
+    if ($pwshCommand) { $childPath.Add((Split-Path -Parent $pwshCommand.Source)) }
+    foreach ($entry in @($env:PATH -split [IO.Path]::PathSeparator)) {
+        if (-not [string]::IsNullOrWhiteSpace($entry)) { $childPath.Add($entry) }
+    }
+    $startInfo.Environment['PATH'] = (@($childPath | Select-Object -Unique) -join [IO.Path]::PathSeparator)
+    $startInfo.Environment['PATHEXT'] = '.COM;.EXE;.BAT;.CMD'
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    try {
+        if (-not $process.Start()) { throw 'Unable to start Flutter command.' }
+        $stdoutTask = if ($CaptureOutput) { $process.StandardOutput.ReadToEndAsync() } else { $null }
+        $stderrTask = if ($CaptureOutput) { $process.StandardError.ReadToEndAsync() } else { $null }
+        $process.WaitForExit()
+        $stdout = if ($CaptureOutput) { $stdoutTask.GetAwaiter().GetResult() } else { '' }
+        $stderr = if ($CaptureOutput) { $stderrTask.GetAwaiter().GetResult() } else { '' }
+        if ($process.ExitCode -ne 0) {
+            $detail = (@($stdout, $stderr) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }) -join ' '
+            if ($detail) { throw "$FailureMessage ExitCode=$($process.ExitCode) $($detail.Trim())" }
+            throw "$FailureMessage ExitCode=$($process.ExitCode)"
+        }
+        if ($CaptureOutput) {
+            return [pscustomobject]@{
+                ExitCode = $process.ExitCode
+                StdOut = $stdout
+                StdErr = $stderr
+            }
+        }
+    } finally {
+        $process.Dispose()
     }
 }
 
@@ -980,7 +1106,7 @@ $androidActions = @(
     'InstallAndroidDebug', 'LaunchAndroidDebug', 'BuildInstallAndroidDebug'
 )
 $windowsActions = @(
-    'WindowsToolchainCheck',
+    'Test', 'WindowsToolchainCheck',
     'BuildWindowsDebug', 'BuildWindowsRelease', 'BuildAllDebug',
     'BuildRunWindowsDebug'
 )

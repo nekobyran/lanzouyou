@@ -46,7 +46,11 @@ class _LibraryWorkspacePageState extends State<LibraryWorkspacePage>
     super.dispose();
   }
 
-  void _reload() => setState(() => _projects = _store.list());
+  void _reload() {
+    setState(() {
+      _projects = _store.list();
+    });
+  }
 
   @override
   Widget build(BuildContext context) {

@@ -62,7 +62,7 @@ void main() {
     await tester.tap(find.byKey(const Key('upload-button')));
     await tester.pumpAndSettle();
     expect(find.byKey(const Key('auto-icon-switch')), findsOneWidget);
-    expect(find.text('自动获取并压缩为文件图标（<100KB）'), findsOneWidget);
+    expect(find.text('自动设置软件图标（严格小于 100KB）'), findsOneWidget);
     expect(
       find.byKey(const Key('one-click-apk-upload-action')),
       findsOneWidget,
@@ -420,7 +420,7 @@ void main() {
     expect(find.text('597 个官方来源 · 9 个合集'), findsOneWidget);
     await tester.tap(find.text('账号与会员'));
     await tester.pumpAndSettle();
-    expect(find.text('蓝奏账号会话'), findsOneWidget);
+    expect(find.text('个人中心'), findsOneWidget);
     expect(find.byKey(const Key('logout-tile')), findsOneWidget);
     expect(find.text('Rust 文件核心'), findsNothing);
     expect(find.textContaining('系统安全存储'), findsNothing);
