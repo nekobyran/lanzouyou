@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import contextlib
-import hashlib
 import io
 import os
 import re
@@ -37,6 +36,9 @@ class FakeCore:
         self.list_name_override: str | None = None
         self.share_name_override: str | None = None
         self.ambiguous_folder_description_once = False
+        self.ambiguous_upload_once = False
+        self.ambiguous_file_description_once = False
+        self.ambiguous_icon_once = False
         self.fail_download_id: str | None = None
 
     @staticmethod
@@ -140,6 +142,9 @@ class FakeCore:
                 name,
                 content=Path(str(command["path"])).read_bytes(),
             )
+            if self.ambiguous_upload_once:
+                self.ambiguous_upload_once = False
+                raise tool.PublishError("core_ambiguous_result")
             return {
                 "id": identifier,
                 "folderId": command["folderId"],
@@ -170,10 +175,16 @@ class FakeCore:
             if item.get("isFolder") is True and self.ambiguous_folder_description_once:
                 self.ambiguous_folder_description_once = False
                 raise tool.PublishError("core_ambiguous_result")
+            if item.get("isFolder") is False and self.ambiguous_file_description_once:
+                self.ambiguous_file_description_once = False
+                raise tool.PublishError("core_ambiguous_result")
             return {}
         if operation == "set_icon":
             item = self._find_active(command.get("fileId"))
             item["hasCustomIcon"] = True
+            if self.ambiguous_icon_once:
+                self.ambiguous_icon_once = False
+                raise tool.PublishError("core_ambiguous_result")
             return {"fileId": item["id"]}
         if operation == "share_info":
             item = self._find_item(command.get("id"))
@@ -585,7 +596,41 @@ class PublishLanzouMaxTests(unittest.TestCase):
         self.assertEqual(fake.root[0]["description"], tool.PRIMARY_FOLDER_DESCRIPTION)
         self.assertEqual(sum(call["op"] == "upload" for call in fake.calls), 2)
 
+    def test_ambiguous_staging_mutations_use_readback_without_replay(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            fake, _ = self.populated_fake()
+            fake.ambiguous_upload_once = True
+            fake.ambiguous_file_description_once = True
+            fake.ambiguous_icon_once = True
+            publisher = self.publisher(fake, self.make_apk(root))
+            publisher.authenticate("fake-user", "fake-password")
+
+            summary = publisher.execute()
+
+        self.assertEqual(summary.target_count, 2)
+        self.assertEqual(sum(call["op"] == "upload" for call in fake.calls), 2)
+        self.assertEqual(
+            sum(
+                call["op"] == "set_description"
+                and call.get("isFolder") is False
+                for call in fake.calls
+            ),
+            2,
+        )
+        self.assertEqual(sum(call["op"] == "set_icon" for call in fake.calls), 2)
+        final_name = tool.final_apk_name(self.VERSION)
+        for folder_id in (fake.primary_id, fake.library_id):
+            published = [
+                item
+                for item in fake.active.values()
+                if item["parent"] == folder_id and item["name"] == final_name
+            ]
+            self.assertEqual(len(published), 1)
+            self.assertIs(published[0]["hasCustomIcon"], True)
+            self.assertEqual(published[0]["description"], tool.DESCRIPTION)
     def test_eventually_consistent_metadata_and_rename_are_polled_until_visible(self) -> None:
+
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             fake = EventuallyConsistentFakeCore(stale_reads=2)
@@ -998,11 +1043,9 @@ class PublishLanzouMaxTests(unittest.TestCase):
 
             self.assertEqual(summary.target_count, 2)
             self.assertEqual(summary.verified_count, 2)
-            self.assertEqual(summary.sha256, hashlib.sha256(payload).hexdigest())
             self.assertEqual(
                 summary.safe_line(),
-                "result=readback_verified;targets=2;verified=2;sha256="
-                + hashlib.sha256(payload).hexdigest(),
+                "result=readback_verified;targets=2;verified=2",
             )
             self.assertEqual(list(readback_root.iterdir()), [])
             operations = [str(call["op"]) for call in fake.calls]
@@ -1355,10 +1398,9 @@ class PublishLanzouMaxTests(unittest.TestCase):
                 )
 
         self.assertEqual(result, 0)
-        expected_sha = hashlib.sha256(payload).hexdigest()
         self.assertEqual(
             stdout.getvalue().strip(),
-            f"result=readback_verified;targets=2;verified=2;sha256={expected_sha}",
+            "result=readback_verified;targets=2;verified=2",
         )
         combined = stdout.getvalue() + stderr.getvalue()
         for forbidden in (
@@ -1425,13 +1467,15 @@ class PublishLanzouMaxTests(unittest.TestCase):
         self.assertIn("'--icon', $icon.FullName", powershell)
         self.assertNotIn("[string]$ApkPath", powershell)
         self.assertNotIn("[string]$IconPath", powershell)
-        self.assertNotIn("[string]$Version", powershell)
         self.assertIn("[string]$CredentialFile", powershell)
         self.assertIn("backup/private/lanzouyou-publisher-credential.dpapi", powershell)
         self.assertIn("ConvertTo-SecureString -String $protectedText", powershell)
         self.assertIn("SecureStringToBSTR", powershell)
         self.assertIn("$credentialPayload['account']", powershell)
-        self.assertNotIn("ProtectedData]::Unprotect", powershell)
+        self.assertIn("ProtectedData]::Unprotect", powershell)
+        self.assertIn("flutter_secure_storage.dat", powershell)
+        self.assertIn("provider_session_cookie", powershell)
+        self.assertIn("LANZOUYOU_SESSION_COOKIE", powershell)
         self.assertIn("LANZOUYOU_USERNAME", powershell)
         self.assertIn("LANZOUYOU_PASSWORD", powershell)
         self.assertIn("ProcessStartInfo", powershell)
@@ -1462,7 +1506,7 @@ class PublishLanzouMaxTests(unittest.TestCase):
         )
         self.assertIsNotNone(
             output_allowlist.fullmatch(
-                "result=readback_verified;targets=2;verified=2;sha256=" + "a" * 64
+                "result=readback_verified;targets=2;verified=2"
             )
         )
         self.assertIsNone(

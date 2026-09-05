@@ -892,11 +892,12 @@ pub fn ajax_file_id(html: &str) -> Option<String> {
 }
 
 pub fn ajax_endpoint(html: &str) -> Option<String> {
-    capture(
-        html,
-        r#"(?is)url\s*:\s*['\"]([^'\"]*ajaxm\.php(?:\?file=\d+)?)"#,
-    )
-    .or_else(|| capture(html, r#"(?is)['\"]([^'\"]*ajaxm\.php(?:\?file=\d+)?)['\"]"#))
+    const ENDPOINT: &str = r#"(?:ajax|ajaxm|ajaxfile)\.php(?:\?[^'\"\s]*)?"#;
+    let named = format!(r#"(?is)url\s*:\s*['\"]([^'\"]*{ENDPOINT})"#);
+    capture(html, &named).or_else(|| {
+        let quoted = format!(r#"(?is)['\"]([^'\"]*{ENDPOINT})['\"]"#);
+        capture(html, &quoted)
+    })
 }
 
 pub fn function_block(html: &str, name: &str) -> Option<String> {
@@ -1105,6 +1106,20 @@ fn clean_html_text(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_ajax_endpoint_accepts_current_single_file_endpoint_family() {
+        for (html, expected) in [
+            (r#"$.ajax({url:'/ajax.php'});"#, "/ajax.php"),
+            (r#"$.ajax({url:'/ajaxm.php?file=42'});"#, "/ajaxm.php?file=42"),
+            (
+                r#"$.ajax({type:'post',url:'/ajaxfile.php?file=315614084',data:{action:'downprocess'}});"#,
+                "/ajaxfile.php?file=315614084",
+            ),
+        ] {
+            assert_eq!(ajax_endpoint(html).as_deref(), Some(expected));
+        }
+    }
 
     #[test]
     fn test_api_json_maps_expired_cookie() {

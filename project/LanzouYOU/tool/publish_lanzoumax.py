@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import argparse
 import ctypes
-import hashlib
 import json
 import os
 import re
@@ -65,6 +64,7 @@ SAFE_ERROR_RE = re.compile(r"\A[a-z0-9_]{1,64}\Z", re.ASCII)
 ALLOWED_OPERATIONS = frozenset(
     {
         "login",
+        "restore_session",
         "list",
         "upload",
         "set_description",
@@ -139,11 +139,25 @@ class RustCore:
         if envelope.get("ok") is not True:
             raw_error = envelope.get("error")
             raw_code = raw_error.get("code") if isinstance(raw_error, dict) else None
+            raw_message = raw_error.get("message") if isinstance(raw_error, dict) else None
             core_code = (
                 raw_code
                 if isinstance(raw_code, str) and SAFE_ERROR_RE.fullmatch(raw_code)
                 else "core_error"
             )
+            if core_code == "parse_error" and isinstance(raw_message, str):
+                for marker, classified in (
+                    ("下载页缺少 AJAX 地址", "download_ajax_address_missing"),
+                    ("下载页地址无效", "download_page_url_invalid"),
+                    ("二次下载验证", "download_verify_parse_error"),
+                    ("下载重定向", "download_redirect_parse_error"),
+                    ("下载接口", "download_api_parse_error"),
+                    ("下载页", "download_page_parse_error"),
+                    ("分享", "share_parse_error"),
+                ):
+                    if marker in raw_message:
+                        core_code = classified
+                        break
             raise PublishError(f"core_{core_code}")
         data = envelope.get("data")
         if not isinstance(data, dict):
@@ -218,23 +232,12 @@ class PublishSummary:
 class ReadbackSummary:
     target_count: int
     verified_count: int
-    sha256: str
 
     def safe_line(self) -> str:
-        if not re.fullmatch(r"[0-9a-f]{64}", self.sha256):
-            raise PublishError("readback_summary_invalid")
         return (
             f"result=readback_verified;targets={self.target_count};"
-            f"verified={self.verified_count};sha256={self.sha256}"
+            f"verified={self.verified_count}"
         )
-
-
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
-            digest.update(block)
-    return digest.hexdigest()
 
 
 def validate_readback_temp_root(value: Path) -> Path:
@@ -336,6 +339,13 @@ class Publisher:
         # Login data (including the cookie returned by the native core) is
         # intentionally discarded; the Rust global session owns it.
         self.core.call({"op": "login", "account": username, "password": password})
+
+
+    def restore_session(self, cookie: str) -> None:
+        if not cookie:
+            raise PublishError("credentials_missing")
+        self.core.call({"op": "restore_session", "cookie": cookie})
+
 
     def execute(self, *, dry_run: bool = False) -> PublishSummary:
         self._validate_inputs()
@@ -482,7 +492,7 @@ class Publisher:
             raise PublishError("readback_target_count_invalid")
 
         expected_bytes = self.apk_path.stat().st_size
-        expected_sha256 = sha256_file(self.apk_path)
+        expected_content = self.apk_path.read_bytes()
         verified = 0
         try:
             with tempfile.TemporaryDirectory(
@@ -516,7 +526,7 @@ class Publisher:
                     if (
                         bytes_written != expected_bytes
                         or destination.stat().st_size != expected_bytes
-                        or sha256_file(destination) != expected_sha256
+                        or destination.read_bytes() != expected_content
                     ):
                         raise PublishError("readback_bytes_mismatch")
                     verified += 1
@@ -528,7 +538,7 @@ class Publisher:
         try:
             local_changed = (
                 self.apk_path.stat().st_size != expected_bytes
-                or sha256_file(self.apk_path) != expected_sha256
+                or self.apk_path.read_bytes() != expected_content
             )
         except OSError:
             raise PublishError("readback_local_changed") from None
@@ -536,7 +546,7 @@ class Publisher:
             raise PublishError("readback_local_changed")
         if verified != len(TARGET_FOLDERS):
             raise PublishError("readback_target_count_invalid")
-        return ReadbackSummary(len(TARGET_FOLDERS), verified, expected_sha256)
+        return ReadbackSummary(len(TARGET_FOLDERS), verified)
 
     def _list_all(self, folder_id: str) -> list[CloudItem]:
         result: list[CloudItem] = []
@@ -670,15 +680,24 @@ class Publisher:
         icon_path: Path,
     ) -> None:
         plan.upload_attempted = True
-        data = self.core.call(
-            {
-                "op": "upload",
-                "folderId": plan.folder.id,
-                "path": os.fspath(staging_apk),
-                "compatWrap": False,
-                "kind": "file",
-            }
-        )
+        try:
+            data = self.core.call(
+                {
+                    "op": "upload",
+                    "folderId": plan.folder.id,
+                    "path": os.fspath(staging_apk),
+                    "compatWrap": False,
+                    "kind": "file",
+                }
+            )
+        except PublishError as error:
+            if error.code != "core_ambiguous_result":
+                raise
+            # The upload may already have committed remotely. The staging name
+            # contains a per-run token, so a unique authenticated list readback
+            # can identify it without replaying the upload.
+            plan.stage = self._locate_stage(plan.folder.id, staging_name)
+            data = {"id": plan.stage.id, "uploadedName": staging_name}
         identifier = data.get("id")
         if isinstance(identifier, str) and identifier:
             plan.stage = CloudItem(identifier, staging_name, False, False, None)
@@ -687,21 +706,33 @@ class Publisher:
         if plan.stage is None:
             plan.stage = self._locate_stage(plan.folder.id, staging_name)
 
-        self.core.call(
-            {
-                "op": "set_description",
-                "id": plan.stage.id,
-                "isFolder": False,
-                "description": DESCRIPTION,
-            }
-        )
-        self.core.call(
-            {
-                "op": "set_icon",
-                "fileId": plan.stage.id,
-                "path": os.fspath(icon_path),
-            }
-        )
+        try:
+            self.core.call(
+                {
+                    "op": "set_description",
+                    "id": plan.stage.id,
+                    "isFolder": False,
+                    "description": DESCRIPTION,
+                }
+            )
+        except PublishError as error:
+            if error.code != "core_ambiguous_result":
+                raise
+            # Never replay an ambiguous metadata write; the bounded readback
+            # below verifies the exact id and description.
+        try:
+            self.core.call(
+                {
+                    "op": "set_icon",
+                    "fileId": plan.stage.id,
+                    "path": os.fspath(icon_path),
+                }
+            )
+        except PublishError as error:
+            if error.code != "core_ambiguous_result":
+                raise
+            # Never replay an ambiguous icon write; readback verifies the icon
+            # state together with the file identity and description.
         confirmed, _ = self._wait_for_verified_file(
             plan.folder.id,
             plan.stage.id,
@@ -1008,19 +1039,23 @@ def main(argv: list[str] | None = None) -> int:
         return 2
     username = os.environ.pop("LANZOUYOU_USERNAME", "")
     password = os.environ.pop("LANZOUYOU_PASSWORD", "")
+    session_cookie = os.environ.pop("LANZOUYOU_SESSION_COOKIE", "")
     try:
-        if not username or not password:
+        if not session_cookie and (not username or not password):
             raise PublishError("credentials_missing")
         if not args.core_dll.is_file():
             raise PublishError("core_unavailable")
         core = RustCore(args.core_dll.resolve())
         publisher = Publisher(core, args.apk, args.icon, args.version)
-        publisher.authenticate(username, password)
-        # Drop the Python references as soon as login has copied them into the
-        # native request/session. Python strings are immutable, so this is
-        # best-effort lifetime reduction rather than guaranteed zeroization.
+        if session_cookie:
+            publisher.restore_session(session_cookie)
+        else:
+            publisher.authenticate(username, password)
+        # Drop Python references as soon as the native session owns auth state.
+        session_cookie = ""
         username = ""
         password = ""
+
         if args.verify_readback:
             summary = publisher.verify_readback(readback_temp_root)
         else:
@@ -1033,8 +1068,10 @@ def main(argv: list[str] | None = None) -> int:
         print("error_code=publish_failed;rollback=incomplete", file=sys.stderr)
         return 3
     finally:
+        session_cookie = ""
         username = ""
         password = ""
+
     print(summary.safe_line())
     return 0
 
