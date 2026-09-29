@@ -32,7 +32,7 @@ void main() {
         ),
       ),
     );
-    await tester.pumpAndSettle();
+    await _pumpLibrary(tester);
 
     expect(find.byKey(const Key('public-library-root')), findsOneWidget);
     expect(find.text('12 个官方来源'), findsOneWidget);
@@ -57,7 +57,7 @@ void main() {
       await tester.pumpWidget(
         MaterialApp(home: PublicLibraryPage(controller: controller)),
       );
-      await tester.pumpAndSettle();
+      await _pumpLibrary(tester);
       await tester.enterText(
         find.byKey(const Key('public-library-search-field')),
         '工具',
@@ -74,7 +74,7 @@ void main() {
       expect(core.cancelled, hasLength(1));
 
       pending.complete(const LibrarySearchResult());
-      await tester.pumpAndSettle();
+      await _pumpLibrary(tester);
       expect(find.text('已取消搜索'), findsOneWidget);
     },
   );
@@ -102,7 +102,7 @@ void main() {
         ),
       ),
     );
-    await tester.pumpAndSettle();
+    await _pumpLibrary(tester);
     await tester.tap(find.text('真实工具.apk'));
     await tester.pump();
 
@@ -113,7 +113,7 @@ void main() {
     expect(find.text('正在读取详情'), findsOneWidget);
 
     detail.complete(const LibraryDescribeResult(description: '来自蓝奏云的真实简介'));
-    await tester.pumpAndSettle();
+    await _pumpLibrary(tester);
     expect(find.text('来自蓝奏云的真实简介'), findsOneWidget);
   });
 
@@ -139,9 +139,9 @@ void main() {
         ),
       ),
     );
-    await tester.pumpAndSettle();
+    await _pumpLibrary(tester);
     await tester.tap(find.text('宽屏软件'));
-    await tester.pumpAndSettle();
+    await _pumpLibrary(tester);
 
     expect(find.byKey(const Key('public-library-detail-pane')), findsOneWidget);
     expect(find.byKey(const Key('public-library-detail-sheet')), findsNothing);
@@ -173,13 +173,13 @@ void main() {
     await tester.pumpWidget(
       MaterialApp(home: PublicLibraryPage(controller: controller)),
     );
-    await tester.pumpAndSettle();
+    await _pumpLibrary(tester);
     await tester.enterText(
       find.byKey(const Key('public-library-search-field')),
       '工具',
     );
     await tester.tap(find.byTooltip('搜索软件'));
-    await tester.pumpAndSettle();
+    await _pumpLibrary(tester);
 
     final sourceLink = find.byKey(
       const Key('public-library-source-stable-source-id'),
@@ -191,11 +191,11 @@ void main() {
     );
 
     await tester.tap(sourceLink);
-    await tester.pumpAndSettle();
+    await _pumpLibrary(tester);
     expect(core.browseNodeIds.last, 'stable-source-id');
 
     await controller.goBack();
-    await tester.pumpAndSettle();
+    await _pumpLibrary(tester);
     expect(find.text('真实工具.apk'), findsOneWidget);
     expect(find.text('工具'), findsOneWidget);
   });
@@ -217,7 +217,7 @@ void main() {
           ),
         ),
       );
-      await tester.pumpAndSettle();
+      await _pumpLibrary(tester);
 
       expect(find.byKey(const Key('public-library-safe-area')), findsOneWidget);
       expect(
@@ -242,18 +242,18 @@ void main() {
     await tester.pumpWidget(
       MaterialApp(home: PublicLibraryPage(controller: controller)),
     );
-    await tester.pumpAndSettle();
+    await _pumpLibrary(tester);
     expect(find.text('加载失败'), findsOneWidget);
     expect(find.text('来源暂时不可用'), findsOneWidget);
 
     core.pageFailure = null;
     await tester.tap(find.text('重试'));
-    await tester.pumpAndSettle();
+    await _pumpLibrary(tester);
     expect(find.text('source-1'), findsOneWidget);
 
     core.pageOverride = _page(const <PublicLibraryCatalogNode>[]);
     await controller.refresh();
-    await tester.pumpAndSettle();
+    await _pumpLibrary(tester);
     expect(find.text('暂无内容'), findsOneWidget);
   });
 
@@ -285,21 +285,21 @@ void main() {
     await tester.pumpWidget(
       MaterialApp(home: PublicLibraryPage(controller: controller)),
     );
-    await tester.pumpAndSettle();
+    await _pumpLibrary(tester);
     expect(find.text('统计暂时不可用'), findsOneWidget);
 
     core.summaryFailure = null;
     await tester.tap(find.byKey(const Key('retry-public-library-summary')));
-    await tester.pumpAndSettle();
+    await _pumpLibrary(tester);
     expect(find.text('12 个官方来源'), findsOneWidget);
 
     await tester.tap(find.text('真实工具.apk'));
-    await tester.pumpAndSettle();
+    await _pumpLibrary(tester);
     expect(find.text('详情暂时不可用'), findsOneWidget);
 
     core.descriptionFailure = null;
     await tester.tap(find.text('重试').last);
-    await tester.pumpAndSettle();
+    await _pumpLibrary(tester);
     expect(find.text('真实简介'), findsOneWidget);
   });
 }
@@ -419,4 +419,10 @@ class _PageCore implements PublicLibraryCatalogCore {
 
   @override
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+Future<void> _pumpLibrary(WidgetTester tester) async {
+  for (var i = 0; i < 8; i++) {
+    await tester.pump(const Duration(milliseconds: 50));
+  }
 }

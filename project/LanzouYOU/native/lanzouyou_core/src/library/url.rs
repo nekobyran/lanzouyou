@@ -11,7 +11,7 @@ use reqwest::Url;
 use crate::error::{CoreError, CoreResult};
 
 const FOLDER_MARKER: &str = "lanzou-folder=";
-const LANZOU_PUBLIC_ROOTS: [&str; 2] = ["lanzouw.com", "lanzoui.com"];
+
 const CANONICAL_PUBLIC_ORIGIN: &str = "https://www.lanzouw.com";
 
 #[derive(Clone, Debug)]
@@ -490,9 +490,7 @@ pub(crate) fn reject_explicit_port_reference(value: &str) -> CoreResult<()> {
 }
 
 fn is_lanzou_host(host: &str) -> bool {
-    LANZOU_PUBLIC_ROOTS
-        .iter()
-        .any(|root| is_ascii_host_or_subdomain(host, root))
+    is_legacy_public_host(host)
 }
 
 fn is_legacy_public_host(host: &str) -> bool {
@@ -509,11 +507,21 @@ fn is_legacy_public_host(host: &str) -> bool {
     {
         return false;
     }
-    let family = labels[labels.len() - 2];
-    family == "laozouw"
-        || family.strip_prefix("lanzou").is_some_and(|suffix| {
-            suffix.len() <= 1 && suffix.bytes().all(|byte| byte.is_ascii_alphanumeric())
-        })
+    matches!(
+        labels[labels.len() - 2],
+        "lanzouw"
+            | "lanzoui"
+            | "lanzoub"
+            | "lanzouq"
+            | "lanzoux"
+            | "lanzouy"
+            | "lanzoup"
+            | "lanzout"
+            | "lanzous"
+            | "lanzouj"
+            | "lanzov"
+            | "laozouw"
+    )
 }
 
 fn is_verification_host(host: &str) -> bool {

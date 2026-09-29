@@ -21,6 +21,7 @@ void main() {
         sessionStore: store,
         settingsStore: MemoryAppSettingsStore(),
       );
+      addTearDown(controller.dispose);
 
       final succeeded = await controller.login('test-account', 'test-password');
 
@@ -46,6 +47,7 @@ void main() {
         sessionStore: MemorySessionStore(),
         settingsStore: MemoryAppSettingsStore(),
       );
+      addTearDown(controller.dispose);
 
       expect(await controller.login('test-account', 'test-password'), isTrue);
 
@@ -91,6 +93,7 @@ void main() {
       sessionStore: MemorySessionStore(),
       settingsStore: MemoryAppSettingsStore(),
     );
+    addTearDown(controller.dispose);
 
     expect(await controller.login('test-account', 'test-password'), isTrue);
     expect(controller.accountCapabilitiesError, '暂时无法读取账号能力');
@@ -115,6 +118,7 @@ void main() {
         sessionStore: MemorySessionStore(),
         settingsStore: MemoryAppSettingsStore(),
       );
+      addTearDown(controller.dispose);
       await controller.login('test-account', 'test-password');
       expect(controller.currentAccountCapabilities, isNotNull);
 
@@ -133,6 +137,7 @@ void main() {
       sessionStore: MemorySessionStore(),
       settingsStore: MemoryAppSettingsStore(),
     );
+    addTearDown(controller.dispose);
     const item = CloudItem(id: '8', name: '文件.zip', isFolder: false);
 
     await controller.login('test-account', 'test-password');
@@ -156,6 +161,7 @@ void main() {
         sessionStore: MemorySessionStore(),
         settingsStore: MemoryAppSettingsStore(),
       );
+      addTearDown(controller.dispose);
       const staleItem = CloudItem(
         id: '8',
         name: '应用.apk',
@@ -189,6 +195,7 @@ void main() {
       sessionStore: MemorySessionStore(),
       settingsStore: MemoryAppSettingsStore(),
     );
+    addTearDown(controller.dispose);
     await controller.login('test-account', 'test-password');
 
     final outcome = await controller.replacePackage(
@@ -232,6 +239,7 @@ void main() {
       sessionStore: MemorySessionStore(),
       settingsStore: MemoryAppSettingsStore(),
     );
+    addTearDown(controller.dispose);
     await controller.login('test-account', 'test-password');
 
     final outcome = await controller.replacePackage(
@@ -262,6 +270,7 @@ void main() {
       sessionStore: MemorySessionStore(),
       settingsStore: MemoryAppSettingsStore(),
     );
+    addTearDown(controller.dispose);
     await controller.login('test-account', 'test-password');
 
     final outcome = await controller.replacePackage(oldFile, 'broken.apk');
@@ -281,6 +290,7 @@ void main() {
       sessionStore: store,
       settingsStore: MemoryAppSettingsStore(),
     );
+    addTearDown(controller.dispose);
     await controller.initialize();
     cloud.listFailure = const CloudFailure('session_expired', '登录状态已失效');
 
@@ -305,6 +315,7 @@ void main() {
         sessionStore: MemorySessionStore(),
         settingsStore: settings,
       );
+      addTearDown(controller.dispose);
 
       await controller.initialize();
 
@@ -326,6 +337,7 @@ void main() {
         sessionStore: MemorySessionStore(),
         settingsStore: settings,
       );
+      addTearDown(controller.dispose);
 
       final first = controller.setThemeMode(ThemeMode.dark);
       final second = controller.setReduceMotion(true);
@@ -355,6 +367,7 @@ void main() {
         sessionStore: MemorySessionStore(),
         settingsStore: settings,
       );
+      addTearDown(controller.dispose);
 
       await controller.setThemeMode(ThemeMode.dark);
 
@@ -380,6 +393,7 @@ void main() {
         sessionStore: MemorySessionStore(cookie: 'test-cookie'),
         settingsStore: settings,
       );
+      addTearDown(first.dispose);
       await first.setThemeMode(ThemeMode.dark);
       await first.setReduceMotion(true);
       await first.logout();
@@ -389,6 +403,7 @@ void main() {
         sessionStore: MemorySessionStore(),
         settingsStore: settings,
       );
+      addTearDown(restarted.dispose);
       await restarted.initialize();
 
       expect(restarted.themeMode, ThemeMode.dark);

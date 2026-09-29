@@ -1,3 +1,4 @@
+import java.util.Properties
 import org.gradle.api.GradleException
 import org.gradle.api.tasks.Exec
 import org.gradle.api.tasks.PathSensitivity
@@ -9,6 +10,28 @@ plugins {
     id("dev.flutter.flutter-gradle-plugin")
 }
 
+val releaseSigningDir = file("signing")
+val releaseKeystoreFile = releaseSigningDir.resolve("release.jks")
+val releasePropertiesFile = releaseSigningDir.resolve("release.properties")
+val releaseRequested = gradle.startParameter.taskNames.any {
+    it.contains("release", ignoreCase = true)
+}
+val releaseSigningReady = releaseKeystoreFile.isFile && releasePropertiesFile.isFile
+val releaseSigningProperties = Properties()
+
+if (releaseRequested && !releaseSigningReady) {
+    throw GradleException(
+        "Android Release signing material is missing. Release builds never fall back to the debug key.",
+    )
+}
+
+if (releaseSigningReady) {
+    releasePropertiesFile.inputStream().use(releaseSigningProperties::load)
+}
+
+fun requiredReleaseSigningProperty(name: String): String =
+    releaseSigningProperties.getProperty(name)?.takeIf { it.isNotBlank() }
+        ?: throw GradleException("Missing Android Release signing property: $name")
 android {
     namespace = "cc.nkbr.lanzouyou"
     compileSdk = flutter.compileSdkVersion
@@ -34,11 +57,26 @@ android {
         }
     }
 
+    signingConfigs {
+        create("release") {
+            if (releaseSigningReady) {
+                storeFile = releaseKeystoreFile
+                storePassword = requiredReleaseSigningProperty("storePassword")
+                keyAlias = requiredReleaseSigningProperty("keyAlias")
+                keyPassword = requiredReleaseSigningProperty("keyPassword")
+            }
+        }
+    }
+
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.getByName("release")
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(
+                getDefaultProguardFile("proguard-android-optimize.txt"),
+                "proguard-rules.pro",
+            )
         }
     }
 
@@ -168,3 +206,4 @@ tasks.matching { it.name == "preDebugBuild" }.configureEach {
 tasks.matching { it.name in setOf("preProfileBuild", "preReleaseBuild") }.configureEach {
     dependsOn(syncReleaseRustJniLibs)
 }
+

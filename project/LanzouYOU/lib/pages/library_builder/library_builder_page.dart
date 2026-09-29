@@ -1103,7 +1103,7 @@ class _ArtifactResults extends StatelessWidget {
           for (final artifact in result.artifacts)
             AppMotionListItem(
               key: ValueKey(
-                'artifact-motion-${artifact.platform}-${artifact.sha256}',
+                'artifact-motion-${artifact.platform}-${artifact.fileName}-${artifact.byteLength}',
               ),
               child: ListTile(
                 contentPadding: EdgeInsets.zero,
@@ -1122,7 +1122,7 @@ class _ArtifactResults extends StatelessWidget {
                       ? '可安装到 Android 设备'
                       : '复制到 Windows 后解压运行',
                 ),
-                trailing: Text(_shortHash(artifact.sha256)),
+                trailing: Text(_formatArtifactBytes(artifact.byteLength)),
               ),
             ),
         ],
@@ -1323,8 +1323,13 @@ String _nextSourceId(List<LibrarySourceRecipe> sources) {
   return 'source-$index';
 }
 
-String _shortHash(String value) =>
-    value.length <= 12 ? value : value.substring(0, 12);
+String _formatArtifactBytes(int bytes) {
+  const kib = 1024;
+  const mib = kib * 1024;
+  if (bytes >= mib) return '${(bytes / mib).toStringAsFixed(1)} MiB';
+  if (bytes >= kib) return '${(bytes / kib).toStringAsFixed(1)} KiB';
+  return '$bytes B';
+}
 
 Future<void> _deleteFileQuietly(String path) async {
   try {

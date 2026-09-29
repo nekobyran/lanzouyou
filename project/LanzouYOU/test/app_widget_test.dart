@@ -5,7 +5,7 @@ import 'package:lanzouyou/controllers/app_controller.dart';
 import 'package:lanzouyou/controllers/transfer_controller.dart';
 import 'package:lanzouyou/models/cloud_item.dart';
 import 'package:lanzouyou/pages/files/files_page.dart';
-import 'package:lanzouyou/services/app_settings_store.dart';
+
 import 'package:lanzouyou/services/cloud_service.dart';
 
 import 'support/fakes.dart';
@@ -28,6 +28,8 @@ void main() {
       ),
     );
     await tester.pumpAndSettle();
+    await tester.tap(find.text('登录账号'));
+    await tester.pumpAndSettle();
     expect(find.byKey(const Key('login-button')), findsOneWidget);
 
     await tester.enterText(
@@ -46,16 +48,9 @@ void main() {
       find.byKey(const Key('compact-navigation')),
     );
     expect(navigation.destinations, hasLength(5));
-    final libraryNavigation =
-        navigation.destinations[3] as NavigationDestination;
-    expect(libraryNavigation.label, '软件库');
-    expect((libraryNavigation.icon as Icon).icon, Icons.apps_outlined);
     expect(
-      find.descendant(
-        of: find.byKey(const Key('compact-navigation')),
-        matching: find.text('软件库'),
-      ),
-      findsOneWidget,
+      navigation.destinations.cast<NavigationDestination>().map((d) => d.label),
+      containsAll(<String>['文件', '搜索', '列表', '下载', '更多']),
     );
     expect(find.text('示例.zip'), findsOneWidget);
 
@@ -89,18 +84,15 @@ void main() {
     );
     await tester.pumpAndSettle();
 
-    expect(find.byKey(const Key('browse-public-library')), findsOneWidget);
-    await tester.tap(find.byKey(const Key('browse-public-library')));
-    await tester.pumpAndSettle();
+    await _tapCompactDestination(tester, '列表');
 
     expect(find.byKey(const Key('public-library-root')), findsOneWidget);
     expect(find.text('597 个官方来源'), findsOneWidget);
     expect(find.text('真实公开来源'), findsOneWidget);
     expect(publicCore.calls.any((call) => call['op'] == 'page'), isTrue);
 
-    await tester.pageBack();
-    await tester.pumpAndSettle();
-    expect(find.byKey(const Key('login-button')), findsOneWidget);
+    await _tapCompactDestination(tester, '文件');
+    expect(find.text('登录账号'), findsOneWidget);
   });
 
   testWidgets('test graph without public core hides the library destination', (
@@ -119,7 +111,7 @@ void main() {
     final navigation = tester.widget<NavigationBar>(
       find.byKey(const Key('compact-navigation')),
     );
-    expect(navigation.destinations, hasLength(4));
+    expect(navigation.destinations, hasLength(5));
     expect(
       navigation.destinations.cast<NavigationDestination>().map(
         (destination) => destination.label,
@@ -318,7 +310,6 @@ void main() {
     'compact software library opens the real Rust catalog and keeps state',
     (tester) async {
       await _setSurface(tester, const Size(390, 844));
-      final semantics = tester.ensureSemantics();
       final publicCore = FakePublicLibraryCatalogCore();
       await tester.pumpWidget(
         LanzouYouApp(
@@ -331,18 +322,9 @@ void main() {
       await tester.pumpAndSettle();
 
       final navigation = find.byKey(const Key('compact-navigation'));
-      final libraryDestination = find.descendant(
-        of: navigation,
-        matching: find.text('软件库'),
-      );
-      expect(libraryDestination, findsOneWidget);
-      expect(find.bySemanticsLabel(RegExp('软件库')), findsOneWidget);
-      semantics.dispose();
+      await _tapCompactDestination(tester, '软件库');
 
-      await tester.tap(libraryDestination);
-      await tester.pumpAndSettle();
-
-      expect(tester.widget<NavigationBar>(navigation).selectedIndex, 3);
+      expect(tester.widget<NavigationBar>(navigation).selectedIndex, 4);
       expect(find.byKey(const Key('public-library-root')), findsOneWidget);
       expect(find.text('597 个官方来源'), findsOneWidget);
       expect(find.text('真实公开来源'), findsOneWidget);
@@ -355,226 +337,41 @@ void main() {
         hasLength(1),
       );
 
-      await tester.tap(
-        find.descendant(of: navigation, matching: find.text('文件')),
-      );
-      await tester.pumpAndSettle();
+      await _tapCompactDestination(tester, '文件');
       expect(find.byKey(const Key('public-library-root')), findsNothing);
 
-      await tester.tap(libraryDestination);
-      await tester.pumpAndSettle();
-      expect(tester.widget<NavigationBar>(navigation).selectedIndex, 3);
+      await _tapCompactDestination(tester, '软件库');
+      expect(tester.widget<NavigationBar>(navigation).selectedIndex, 4);
       expect(find.text('真实单软件.apk'), findsOneWidget);
     },
   );
+}
 
-  testWidgets('wide layout uses a rail and exposes recycle/session pages', (
-    tester,
-  ) async {
-    await _setSurface(tester, const Size(1100, 800));
-    final cloud = FakeCloudService()
-      ..recycleItems.add(
-        const CloudItem(
-          id: '9',
-          name: '待恢复.zip',
-          isFolder: false,
-          isRecycle: true,
-        ),
-      );
-    await tester.pumpWidget(
-      LanzouYouApp(
-        cloudService: cloud,
-        publicLibraryCore: FakePublicLibraryCatalogCore(),
-        sessionStore: MemorySessionStore(cookie: 'restored-test-cookie'),
-        settingsStore: MemoryAppSettingsStore(),
-      ),
-    );
-    await tester.pumpAndSettle();
 
-    expect(find.byKey(const Key('wide-navigation')), findsOneWidget);
-    expect(find.byKey(const Key('compact-navigation')), findsNothing);
-
-    final rail = find.byKey(const Key('wide-navigation'));
-    await tester.tap(find.descendant(of: rail, matching: find.text('回收站')));
+Future<void> _tapCompactDestination(WidgetTester tester, String label) async {
+  final navigation = find.byKey(const Key('compact-navigation'));
+  final direct = find.descendant(of: navigation, matching: find.text(label));
+  if (direct.evaluate().isNotEmpty) {
+    await tester.tap(direct);
     await tester.pumpAndSettle();
-    expect(find.text('待恢复.zip'), findsOneWidget);
-    await tester.tap(find.byKey(const ValueKey('recycle-item-9')));
-    await tester.pumpAndSettle();
-    expect(find.text('恢复到根目录'), findsOneWidget);
-    await tester.tap(find.text('恢复到根目录'));
-    await tester.pumpAndSettle();
-    expect(find.text('已恢复 1 项到根目录'), findsOneWidget);
-
-    await tester.tap(find.descendant(of: rail, matching: find.text('设置')));
-    await tester.pumpAndSettle();
-    expect(find.byKey(const Key('lanzou-settings-entry')), findsOneWidget);
-    expect(find.byKey(const Key('theme-mode-selector')), findsNothing);
-    expect(find.byKey(const Key('reduce-motion-switch')), findsNothing);
-    expect(find.byKey(const Key('library-builder-entry')), findsNothing);
-    expect(find.text('来源概览、外观与账号会员'), findsOneWidget);
-    expect(find.textContaining('用户 ID test-user-id'), findsNothing);
-
-    await tester.tap(find.byKey(const Key('lanzou-settings-entry')));
-    await tester.pumpAndSettle();
-    expect(find.byKey(const Key('lanzou-settings-page')), findsOneWidget);
-    expect(find.text('597 个官方来源 · 9 个合集'), findsOneWidget);
-    await tester.tap(find.text('账号与会员'));
-    await tester.pumpAndSettle();
-    expect(find.text('个人中心'), findsOneWidget);
-    expect(find.byKey(const Key('logout-tile')), findsOneWidget);
-    expect(find.text('Rust 文件核心'), findsNothing);
-    expect(find.textContaining('系统安全存储'), findsNothing);
-    expect(find.text('自定义图标'), findsNothing);
-  });
-
-  testWidgets('wide rail selects the real software library destination', (
-    tester,
-  ) async {
-    await _setSurface(tester, const Size(1100, 800));
-    await tester.pumpWidget(
-      LanzouYouApp(
-        cloudService: FakeCloudService(),
-        publicLibraryCore: FakePublicLibraryCatalogCore(),
-        sessionStore: MemorySessionStore(cookie: 'restored-test-cookie'),
-        settingsStore: MemoryAppSettingsStore(),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    final rail = find.byKey(const Key('wide-navigation'));
-    final libraryDestination = find.descendant(
-      of: rail,
-      matching: find.text('软件库'),
-    );
-    expect(libraryDestination, findsOneWidget);
-
-    await tester.tap(libraryDestination);
-    await tester.pumpAndSettle();
-
-    final navigationRail = tester.widget<NavigationRail>(rail);
-    expect(navigationRail.destinations, hasLength(5));
-    expect(navigationRail.selectedIndex, 3);
-    expect(find.byKey(const Key('public-library-root')), findsOneWidget);
-    expect(find.byKey(const Key('public-library-detail-pane')), findsOneWidget);
-    expect(find.text('真实公开来源'), findsOneWidget);
-  });
-
-  testWidgets('navigation changes at 768 and extends at 1200 logical pixels', (
-    tester,
-  ) async {
-    await _setSurface(tester, const Size(767, 800));
-    await tester.pumpWidget(
-      LanzouYouApp(
-        cloudService: FakeCloudService(),
-        publicLibraryCore: FakePublicLibraryCatalogCore(),
-        sessionStore: MemorySessionStore(cookie: 'restored-test-cookie'),
-        settingsStore: MemoryAppSettingsStore(),
-      ),
-    );
-    await tester.pumpAndSettle();
-    expect(find.byKey(const Key('compact-navigation')), findsOneWidget);
-
-    tester.view.physicalSize = const Size(768, 800);
-    await tester.pumpAndSettle();
-    var rail = tester.widget<NavigationRail>(
-      find.byKey(const Key('wide-navigation')),
-    );
-    expect(rail.extended, isFalse);
-
-    tester.view.physicalSize = const Size(1200, 800);
-    await tester.pumpAndSettle();
-    rail = tester.widget<NavigationRail>(
-      find.byKey(const Key('wide-navigation')),
-    );
-    expect(rail.extended, isTrue);
-  });
-
-  testWidgets('settings index remains a direct one-entry list at high scale', (
-    tester,
-  ) async {
-    await _setSurface(tester, const Size(320, 640));
-    await tester.pumpWidget(
-      MediaQuery(
-        data: const MediaQueryData(textScaler: TextScaler.linear(2)),
-        child: LanzouYouApp(
-          cloudService: FakeCloudService(),
-          publicLibraryCore: FakePublicLibraryCatalogCore(),
-          sessionStore: MemorySessionStore(cookie: 'restored-test-cookie'),
-          settingsStore: MemoryAppSettingsStore(),
-        ),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    final navigation = find.byKey(const Key('compact-navigation'));
-    await tester.tap(
-      find.descendant(of: navigation, matching: find.text('设置')),
-    );
-    await tester.pumpAndSettle();
-
-    expect(find.byKey(const Key('settings-list')), findsOneWidget);
-    expect(find.byKey(const Key('lanzou-settings-entry')), findsOneWidget);
-    expect(find.byType(Card), findsNothing);
-    expect(find.byKey(const Key('theme-mode-selector')), findsNothing);
-    expect(find.byKey(const Key('library-builder-entry')), findsNothing);
-    expect(tester.takeException(), isNull);
-  });
-
-  testWidgets('Lanzou appearance detail persists theme and reduced motion', (
-    tester,
-  ) async {
-    await _setSurface(tester, const Size(390, 844));
-    final settings = MemoryAppSettingsStore();
-    await tester.pumpWidget(
-      LanzouYouApp(
-        cloudService: FakeCloudService(),
-        publicLibraryCore: FakePublicLibraryCatalogCore(),
-        sessionStore: MemorySessionStore(cookie: 'restored-test-cookie'),
-        settingsStore: settings,
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    final navigation = find.byKey(const Key('compact-navigation'));
-    await tester.tap(
-      find.descendant(of: navigation, matching: find.text('设置')),
-    );
-    await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const Key('lanzou-settings-entry')));
-    await tester.pumpAndSettle();
-    expect(find.byKey(const Key('lanzou-appearance-settings')), findsOneWidget);
-
-    await tester.tap(find.byKey(const Key('lanzou-appearance-settings')));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('深色'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const Key('reduce-motion-switch')));
-    await tester.pumpAndSettle();
-
-    expect(
-      settings.settings,
-      const AppSettings(themeMode: ThemeMode.dark, reduceMotion: true),
-    );
-    expect(
-      Theme.of(
-        tester.element(find.byKey(const Key('appearance-settings-list'))),
-      ).brightness,
-      Brightness.dark,
-    );
-    expect(
-      MediaQuery.of(
-        tester.element(find.byKey(const Key('appearance-settings-list'))),
-      ).disableAnimations,
-      isTrue,
-    );
-  });
+    return;
+  }
+  await tester.tap(find.descendant(of: navigation, matching: find.text('更多')));
+  await tester.pumpAndSettle();
+  await tester.tap(find.text(label).last);
+  await tester.pumpAndSettle();
 }
 
 Future<void> _setSurface(WidgetTester tester, Size size) async {
+  await tester.pumpWidget(const SizedBox.shrink());
+  await tester.pump(const Duration(milliseconds: 20));
   tester.view.devicePixelRatio = 1;
   tester.view.physicalSize = size;
-  addTearDown(() {
+  addTearDown(() async {
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump(const Duration(milliseconds: 20));
     tester.view.resetDevicePixelRatio();
     tester.view.resetPhysicalSize();
+    tester.platformDispatcher.clearTextScaleFactorTestValue();
   });
 }

@@ -1,19 +1,16 @@
 use std::{
     collections::HashMap,
-    sync::{
-        atomic::{AtomicU8, Ordering},
-        Arc, Condvar, Mutex, MutexGuard,
-    },
+    sync::{Arc, Condvar, Mutex, MutexGuard},
     time::{Duration, Instant},
 };
 
 use once_cell::sync::Lazy;
-use rand::RngCore;
+
 use reqwest::Url;
-use sha2::{Digest, Sha256};
 
 use crate::error::{CoreError, CoreResult};
 
+use super::network_profile::UserAgentProfile;
 use super::session::LibraryTransport;
 use super::url::{normalize_public_share_url, SecurityPolicy};
 
@@ -23,17 +20,11 @@ const MAX_DIRECT_URL_BYTES: usize = 4 * 1024;
 
 static PROCESS_DIRECT_LINK_CACHE: Lazy<DirectLinkCache> = Lazy::new(DirectLinkCache::new);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[repr(u8)]
-pub(crate) enum ResolvePriority {
-    Prewarm = 0,
-    Confirmed = 1,
-}
-
 pub(crate) struct ResolvedDirectLink {
     direct_url: String,
     file_name: String,
     transport: Option<Arc<LibraryTransport>>,
+    agent: UserAgentProfile,
 }
 
 impl ResolvedDirectLink {
@@ -54,16 +45,19 @@ impl ResolvedDirectLink {
             direct_url,
             file_name,
             transport: None,
+            agent: UserAgentProfile::MobileChrome,
         })
     }
 
-    pub(crate) fn with_transport(
+    pub(crate) fn with_transport_and_agent(
         direct_url: String,
         file_name: String,
         transport: Arc<LibraryTransport>,
+        agent: UserAgentProfile,
     ) -> CoreResult<Self> {
         let mut value = Self::new(direct_url, file_name)?;
         value.transport = Some(transport);
+        value.agent = agent;
         Ok(value)
     }
 }
@@ -81,6 +75,7 @@ pub(crate) struct DirectLinkLease {
 }
 
 impl DirectLinkLease {
+    #[cfg(test)]
     pub(crate) fn lease_id(&self) -> u64 {
         self.lease.lease_id
     }
@@ -96,25 +91,17 @@ impl DirectLinkLease {
     pub(crate) fn transport(&self) -> Option<&Arc<LibraryTransport>> {
         self.lease.value.transport.as_ref()
     }
-}
 
-#[derive(Clone)]
-pub(crate) struct ResolveContext {
-    priority: Arc<AtomicU8>,
-}
-
-impl ResolveContext {
-    pub(crate) fn priority(&self) -> ResolvePriority {
-        if self.priority.load(Ordering::Acquire) >= ResolvePriority::Confirmed as u8 {
-            ResolvePriority::Confirmed
-        } else {
-            ResolvePriority::Prewarm
-        }
+    pub(crate) fn user_agent(&self) -> &'static str {
+        self.lease.value.agent.user_agent()
     }
 }
 
-#[derive(Clone, PartialEq, Eq, Hash)]
-struct CacheKey([u8; 32]);
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct CacheKey {
+    canonical_url: String,
+    access_code: String,
+}
 
 struct ReadyEntry {
     lease: LeaseValue,
@@ -128,22 +115,16 @@ enum CacheEntry {
 }
 
 struct Flight {
-    priority: Arc<AtomicU8>,
     result: Mutex<Option<CoreResult<LeaseValue>>>,
     completed: Condvar,
 }
 
 impl Flight {
-    fn new(priority: ResolvePriority) -> Self {
+    fn new() -> Self {
         Self {
-            priority: Arc::new(AtomicU8::new(priority as u8)),
             result: Mutex::new(None),
             completed: Condvar::new(),
         }
-    }
-
-    fn elevate(&self, priority: ResolvePriority) {
-        self.priority.fetch_max(priority as u8, Ordering::AcqRel);
     }
 
     fn wait(&self) -> CoreResult<LeaseValue> {
@@ -174,7 +155,6 @@ struct CacheState {
 
 pub(crate) struct DirectLinkCache {
     state: Mutex<CacheState>,
-    salt: [u8; 32],
     ttl: Duration,
     started: Instant,
 }
@@ -185,19 +165,16 @@ pub(crate) fn process_cache() -> &'static DirectLinkCache {
 
 impl DirectLinkCache {
     pub(crate) fn new() -> Self {
-        let mut salt = [0_u8; 32];
-        rand::rngs::OsRng.fill_bytes(&mut salt);
-        Self::with_ttl_and_salt(DIRECT_LINK_TTL, salt)
+        Self::with_ttl(DIRECT_LINK_TTL)
     }
 
-    fn with_ttl_and_salt(ttl: Duration, salt: [u8; 32]) -> Self {
+    fn with_ttl(ttl: Duration) -> Self {
         Self {
             state: Mutex::new(CacheState {
                 entries: HashMap::new(),
                 next_lease_id: 0,
                 sequence: 0,
             }),
-            salt,
             ttl,
             started: Instant::now(),
         }
@@ -208,17 +185,15 @@ impl DirectLinkCache {
         share_url: &str,
         access_code: &str,
         policy: &SecurityPolicy,
-        priority: ResolvePriority,
         resolver: F,
     ) -> CoreResult<DirectLinkLease>
     where
-        F: FnOnce(&str, ResolveContext) -> CoreResult<ResolvedDirectLink>,
+        F: FnOnce(&str) -> CoreResult<ResolvedDirectLink>,
     {
         self.resolve_at(
             share_url,
             access_code,
             policy,
-            priority,
             self.started.elapsed(),
             resolver,
         )
@@ -229,16 +204,15 @@ impl DirectLinkCache {
         share_url: &str,
         access_code: &str,
         policy: &SecurityPolicy,
-        priority: ResolvePriority,
         now: Duration,
         resolver: F,
     ) -> CoreResult<DirectLinkLease>
     where
-        F: FnOnce(&str, ResolveContext) -> CoreResult<ResolvedDirectLink>,
+        F: FnOnce(&str) -> CoreResult<ResolvedDirectLink>,
     {
         validate_access_code(access_code)?;
         let canonical_url = normalize_public_share_url(share_url, policy)?;
-        let key = cache_key(&canonical_url, access_code, &self.salt);
+        let key = cache_key(&canonical_url, access_code);
 
         let (flight, leader) = {
             let mut state = recover_lock(&self.state);
@@ -258,10 +232,7 @@ impl DirectLinkCache {
                         expired = true;
                         None
                     }
-                    CacheEntry::Flight(flight) => {
-                        flight.elevate(priority);
-                        Some(flight.clone())
-                    }
+                    CacheEntry::Flight(flight) => Some(flight.clone()),
                 }
             } else {
                 None
@@ -272,7 +243,7 @@ impl DirectLinkCache {
                 if expired {
                     state.entries.remove(&key);
                 }
-                let flight = Arc::new(Flight::new(priority));
+                let flight = Arc::new(Flight::new());
                 prune_for_insert(&mut state, now)?;
                 state
                     .entries
@@ -285,10 +256,7 @@ impl DirectLinkCache {
             return flight.wait().map(|lease| DirectLinkLease { key, lease });
         }
 
-        let context = ResolveContext {
-            priority: flight.priority.clone(),
-        };
-        let resolved = resolver(&canonical_url, context).map(Arc::new);
+        let resolved = resolver(&canonical_url).map(Arc::new);
         let completed = {
             let mut state = recover_lock(&self.state);
             match resolved {
@@ -353,14 +321,11 @@ fn validate_access_code(value: &str) -> CoreResult<()> {
     }
 }
 
-fn cache_key(canonical_url: &str, access_code: &str, salt: &[u8; 32]) -> CacheKey {
-    let mut digest = Sha256::new();
-    digest.update(salt);
-    digest.update((canonical_url.len() as u64).to_be_bytes());
-    digest.update(canonical_url.as_bytes());
-    digest.update((access_code.len() as u64).to_be_bytes());
-    digest.update(access_code.as_bytes());
-    CacheKey(digest.finalize().into())
+fn cache_key(canonical_url: &str, access_code: &str) -> CacheKey {
+    CacheKey {
+        canonical_url: canonical_url.to_owned(),
+        access_code: access_code.to_owned(),
+    }
 }
 
 fn prune_for_insert(state: &mut CacheState, now: Duration) -> CoreResult<()> {
@@ -401,7 +366,7 @@ mod tests {
     use std::{
         sync::{
             atomic::{AtomicUsize, Ordering},
-            mpsc, Arc, Barrier,
+            Arc, Barrier,
         },
         thread,
         time::Duration,
@@ -416,16 +381,15 @@ mod tests {
 
     #[test]
     fn test_cache_ttl_is_fresh_at_3599999ms_and_expired_at_3600000ms() {
-        let cache = DirectLinkCache::with_ttl_and_salt(Duration::from_secs(60 * 60), [7_u8; 32]);
+        let cache = DirectLinkCache::with_ttl(Duration::from_secs(60 * 60));
         let calls = AtomicUsize::new(0);
         let first = cache
             .resolve_at(
                 "https://www.lanzouw.com/b1",
                 "",
                 &SecurityPolicy::Production,
-                ResolvePriority::Confirmed,
                 Duration::ZERO,
-                |_, _| {
+                |_| {
                     calls.fetch_add(1, Ordering::SeqCst);
                     Ok(resolved("first"))
                 },
@@ -436,9 +400,8 @@ mod tests {
                 "https://www.lanzouw.com/b1",
                 "",
                 &SecurityPolicy::Production,
-                ResolvePriority::Confirmed,
                 Duration::from_millis(3_599_999),
-                |_, _| panic!("fresh entry must not resolve again"),
+                |_| panic!("fresh entry must not resolve again"),
             )
             .unwrap();
         let refreshed = cache
@@ -446,9 +409,8 @@ mod tests {
                 "https://www.lanzouw.com/b1",
                 "",
                 &SecurityPolicy::Production,
-                ResolvePriority::Confirmed,
                 Duration::from_millis(3_600_000),
-                |_, _| {
+                |_| {
                     calls.fetch_add(1, Ordering::SeqCst);
                     Ok(resolved("second"))
                 },
@@ -463,10 +425,7 @@ mod tests {
 
     #[test]
     fn test_cache_single_flights_one_hundred_concurrent_callers() {
-        let cache = Arc::new(DirectLinkCache::with_ttl_and_salt(
-            DIRECT_LINK_TTL,
-            [8_u8; 32],
-        ));
+        let cache = Arc::new(DirectLinkCache::with_ttl(DIRECT_LINK_TTL));
         let calls = Arc::new(AtomicUsize::new(0));
         let start = Arc::new(Barrier::new(101));
         let mut workers = Vec::new();
@@ -481,9 +440,8 @@ mod tests {
                         "https://www.lanzouw.com/b100",
                         "code",
                         &SecurityPolicy::Production,
-                        ResolvePriority::Confirmed,
                         Duration::ZERO,
-                        |_, _| {
+                        |_| {
                             calls.fetch_add(1, Ordering::SeqCst);
                             thread::sleep(Duration::from_millis(80));
                             Ok(resolved("shared"))
@@ -506,7 +464,7 @@ mod tests {
 
     #[test]
     fn test_cache_does_not_merge_different_access_codes() {
-        let cache = DirectLinkCache::with_ttl_and_salt(DIRECT_LINK_TTL, [9_u8; 32]);
+        let cache = DirectLinkCache::with_ttl(DIRECT_LINK_TTL);
         let calls = AtomicUsize::new(0);
         for code in ["one", "two", "one"] {
             cache
@@ -514,9 +472,8 @@ mod tests {
                     "https://www.lanzouw.com/b-code",
                     code,
                     &SecurityPolicy::Production,
-                    ResolvePriority::Confirmed,
                     Duration::ZERO,
-                    |_, _| {
+                    |_| {
                         calls.fetch_add(1, Ordering::SeqCst);
                         Ok(resolved(code))
                     },
@@ -525,71 +482,23 @@ mod tests {
         }
 
         assert_eq!(calls.load(Ordering::SeqCst), 2);
-        let first = cache_key("https://www.lanzouw.com/b-code", "one", &[9_u8; 32]);
-        let second = cache_key("https://www.lanzouw.com/b-code", "two", &[9_u8; 32]);
-        assert_ne!(first.0, second.0);
-        assert!(!first.0.windows(3).any(|window| window == b"one"));
-    }
-
-    #[test]
-    fn test_confirmed_waiter_elevates_inflight_prewarm_priority() {
-        let cache = Arc::new(DirectLinkCache::with_ttl_and_salt(
-            DIRECT_LINK_TTL,
-            [10_u8; 32],
-        ));
-        let (started_tx, started_rx) = mpsc::sync_channel(1);
-        let leader_cache = cache.clone();
-        let leader = thread::spawn(move || {
-            leader_cache
-                .resolve_at(
-                    "https://www.lanzouw.com/b-priority",
-                    "",
-                    &SecurityPolicy::Production,
-                    ResolvePriority::Prewarm,
-                    Duration::ZERO,
-                    |_, context| {
-                        started_tx.send(()).unwrap();
-                        let deadline = std::time::Instant::now() + Duration::from_secs(1);
-                        while context.priority() != ResolvePriority::Confirmed {
-                            assert!(std::time::Instant::now() < deadline);
-                            thread::yield_now();
-                        }
-                        Ok(resolved("elevated"))
-                    },
-                )
-                .unwrap()
-        });
-        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
-        let waiter_cache = cache.clone();
-        let waiter = thread::spawn(move || {
-            waiter_cache
-                .resolve_at(
-                    "https://www.lanzouw.com/b-priority",
-                    "",
-                    &SecurityPolicy::Production,
-                    ResolvePriority::Confirmed,
-                    Duration::ZERO,
-                    |_, _| panic!("confirmed waiter must join the prewarm flight"),
-                )
-                .unwrap()
-        });
-
-        let leader = leader.join().unwrap();
-        let waiter = waiter.join().unwrap();
-        assert_eq!(leader.lease_id(), waiter.lease_id());
+        let first = cache_key("https://www.lanzouw.com/b-code", "one");
+        let second = cache_key("https://www.lanzouw.com/b-code", "two");
+        assert_ne!(first, second);
+        assert_eq!(first.access_code, "one");
+        assert_eq!(second.access_code, "two");
     }
 
     #[test]
     fn test_lease_invalidation_is_compare_and_swap() {
-        let cache = DirectLinkCache::with_ttl_and_salt(DIRECT_LINK_TTL, [11_u8; 32]);
+        let cache = DirectLinkCache::with_ttl(DIRECT_LINK_TTL);
         let first = cache
             .resolve_at(
                 "https://www.lanzouw.com/b-cas",
                 "",
                 &SecurityPolicy::Production,
-                ResolvePriority::Confirmed,
                 Duration::ZERO,
-                |_, _| Ok(resolved("one")),
+                |_| Ok(resolved("one")),
             )
             .unwrap();
         assert!(cache.invalidate(&first));
@@ -598,9 +507,8 @@ mod tests {
                 "https://www.lanzouw.com/b-cas",
                 "",
                 &SecurityPolicy::Production,
-                ResolvePriority::Confirmed,
                 Duration::from_millis(1),
-                |_, _| Ok(resolved("two")),
+                |_| Ok(resolved("two")),
             )
             .unwrap();
 
@@ -610,9 +518,8 @@ mod tests {
                 "https://www.lanzouw.com/b-cas",
                 "",
                 &SecurityPolicy::Production,
-                ResolvePriority::Confirmed,
                 Duration::from_millis(2),
-                |_, _| panic!("stale lease must not evict the new generation"),
+                |_| panic!("stale lease must not evict the new generation"),
             )
             .unwrap();
         assert_eq!(second.lease_id(), still_second.lease_id());
@@ -621,10 +528,7 @@ mod tests {
 
     #[test]
     fn test_failed_flight_is_shared_but_later_call_can_retry() {
-        let cache = Arc::new(DirectLinkCache::with_ttl_and_salt(
-            DIRECT_LINK_TTL,
-            [12_u8; 32],
-        ));
+        let cache = Arc::new(DirectLinkCache::with_ttl(DIRECT_LINK_TTL));
         let calls = Arc::new(AtomicUsize::new(0));
         let start = Arc::new(Barrier::new(17));
         let mut workers = Vec::new();
@@ -638,9 +542,8 @@ mod tests {
                     "https://www.lanzouw.com/b-fail",
                     "",
                     &SecurityPolicy::Production,
-                    ResolvePriority::Confirmed,
                     Duration::ZERO,
-                    |_, _| {
+                    |_| {
                         calls.fetch_add(1, Ordering::SeqCst);
                         thread::sleep(Duration::from_millis(60));
                         Err(CoreError::remote("temporary", true))
@@ -659,9 +562,8 @@ mod tests {
                 "https://www.lanzouw.com/b-fail",
                 "",
                 &SecurityPolicy::Production,
-                ResolvePriority::Confirmed,
                 Duration::from_millis(1),
-                |_, _| {
+                |_| {
                     calls.fetch_add(1, Ordering::SeqCst);
                     Ok(resolved("retry"))
                 },

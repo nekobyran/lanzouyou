@@ -16,6 +16,7 @@ class PublicLibraryPage extends StatefulWidget {
     this.disposeController = true,
     this.showAppBar = true,
     this.safeBottom = true,
+    this.autofocusSearch = false,
     this.onOpenPublicUrl,
     super.key,
   });
@@ -24,6 +25,7 @@ class PublicLibraryPage extends StatefulWidget {
   final bool disposeController;
   final bool showAppBar;
   final bool safeBottom;
+  final bool autofocusSearch;
   final PublicLibraryUrlOpener? onOpenPublicUrl;
 
   @override
@@ -40,6 +42,11 @@ class _PublicLibraryPageState extends State<PublicLibraryPage> {
     _searchController = TextEditingController(text: widget.controller.query);
     widget.controller.addListener(_syncSearchText);
     unawaited(widget.controller.initialize());
+    if (widget.autofocusSearch) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _searchFocus.requestFocus();
+      });
+    }
   }
 
   @override

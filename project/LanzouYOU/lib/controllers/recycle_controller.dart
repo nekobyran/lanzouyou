@@ -66,6 +66,15 @@ class RecycleController extends ChangeNotifier {
   Iterable<CloudItem> get selectedItems =>
       _items.where((item) => selectedIds.contains(item.id));
 
+  void reset() {
+    status = RecycleStatus.idle;
+    errorMessage = null;
+    operationRunning = false;
+    _items.clear();
+    selectedIds.clear();
+    _notify();
+  }
+
   Future<String?> restore(Iterable<CloudItem> items) {
     return _operate(items, cloudService.restoreRecycle);
   }

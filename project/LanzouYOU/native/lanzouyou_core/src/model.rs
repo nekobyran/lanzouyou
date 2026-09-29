@@ -161,7 +161,23 @@ pub enum Command {
         is_folder: bool,
     },
     RecycleEmpty,
+    AppUpdateCheck {
+        current_version: String,
+        #[serde(default)]
+        prefer_mirror: bool,
+    },
+    RuntimeCapabilities,
+    LibraryImportVerificationCookie {
+        url: String,
+        cookie: String,
+    },
     OperationStatus {
+        operation_id: String,
+    },
+    OperationPause {
+        operation_id: String,
+    },
+    OperationResume {
         operation_id: String,
     },
     OperationCancel {
@@ -443,6 +459,9 @@ pub enum Command {
         #[serde(default)]
         password: String,
     },
+    LibraryReadDocument {
+        share_url: String,
+    },
     LibraryFetchAsset {
         url: String,
     },
@@ -503,6 +522,7 @@ impl Command {
                 | Self::LibraryResolve { .. }
                 | Self::LibraryDownload { .. }
                 | Self::LibraryDescribe { .. }
+                | Self::LibraryReadDocument { .. }
                 | Self::LibraryFetchAsset { .. }
                 | Self::LibraryRepackageAndroid { .. }
                 | Self::LibraryRepackageWindows { .. }
@@ -646,20 +666,21 @@ mod tests {
             r#"{"op":"source_registry_restore_backup","storageRoot":"D:\\data","expectedGeneration":4}"#,
             r#"{"op":"source_registry_restore_official","storageRoot":"D:\\data","expectedGeneration":4}"#,
             r#"{"op":"source_registry_reset","storageRoot":"D:\\data","expectedGeneration":4}"#,
-            r#"{"op":"catalog_summary"}"#,
-            r#"{"op":"catalog_page","parentId":"","categoryId":"all","query":"工具","cursor":"","limit":100}"#,
-            r#"{"op":"catalog_browse","nodeId":"remote:one","page":1,"refresh":true}"#,
-            r#"{"op":"catalog_search","query":"工具","scopeIds":["local:one"],"options":{"concurrency":16},"operationId":"catalog-search-1"}"#,
-            r#"{"op":"catalog_describe","itemRef":{"sourceId":"opaque","title":"工具.apk","url":"https://www.lanzouw.com/a","shareUrl":"https://www.lanzouw.com/a","folderId":"","isFolder":false}}"#,
-            r#"{"op":"catalog_resolve","nodeId":"file:one"}"#,
-            r#"{"op":"catalog_download","nodeId":"file:one","destinationDirectory":"downloads","operationId":"catalog-download-1"}"#,
+            r#"{"op":"catalog_summary","storageRoot":"D:\\data"}"#,
+            r#"{"op":"catalog_page","storageRoot":"D:\\data","parentId":"","categoryId":"all","query":"工具","cursor":"","limit":100}"#,
+            r#"{"op":"catalog_browse","storageRoot":"D:\\data","nodeId":"remote:one","page":1,"refresh":true}"#,
+            r#"{"op":"catalog_search","storageRoot":"D:\\data","query":"工具","scopeIds":["local:one"],"options":{},"operationId":"catalog-search-1"}"#,
+            r#"{"op":"catalog_describe","storageRoot":"D:\\data","itemRef":{"sourceId":"opaque","title":"工具.apk","url":"https://www.lanzouw.com/a","shareUrl":"https://www.lanzouw.com/a","folderId":"","isFolder":false}}"#,
+            r#"{"op":"catalog_resolve","storageRoot":"D:\\data","nodeId":"file:one"}"#,
+            r#"{"op":"catalog_download","storageRoot":"D:\\data","nodeId":"file:one","destinationDirectory":"downloads","operationId":"catalog-download-1"}"#,
             r#"{"op":"library_probe","source":{"sourceId":"s1","title":"库","shareUrl":"https://www.lanzouw.com/b1","password":"p"}}"#,
             r#"{"op":"library_browse","sourceId":"s1","shareUrl":"https://www.lanzouw.com/b1","password":"p","page":1,"refresh":true}"#,
-            r#"{"op":"library_search","query":"工具","sources":[{"sourceId":"s1","title":"库","shareUrl":"https://www.lanzouw.com/b1","password":"p"}],"options":{"concurrency":4,"sourceSwitchDelayMs":0,"untilLastPage":true,"maxPages":3},"operationId":"search-1"}"#,
+            r#"{"op":"library_search","query":"工具","sources":[{"sourceId":"s1","title":"库","shareUrl":"https://www.lanzouw.com/b1","password":"p"}],"options":{"untilLastPage":true,"maxPages":3},"operationId":"search-1"}"#,
             r#"{"op":"library_collect","items":[{"sourceId":"s1","title":"工具.apk","url":"https://www.lanzouw.com/a","isFolder":false}],"sources":[{"sourceId":"s1","title":"库","shareUrl":"https://www.lanzouw.com/b1","password":"p"}]}"#,
             r#"{"op":"library_resolve","sourceId":"s1","shareUrl":"https://www.lanzouw.com/a","password":"p"}"#,
             r#"{"op":"library_download","sourceId":"s1","shareUrl":"https://www.lanzouw.com/a","password":"p","destinationDirectory":"downloads","operationId":"library-download-1"}"#,
             r#"{"op":"library_describe","sourceId":"s1","shareUrl":"https://www.lanzouw.com/a","password":"p"}"#,
+            r#"{"op":"library_read_document","shareUrl":"https://docs.example/readme.txt"}"#,
             r#"{"op":"library_fetch_asset","url":"https://image.dmpdmp.com/image/icon.png"}"#,
             r#"{"op":"library_repackage_android","templatePath":"shell.apk","outputPath":"out.apk","runtimeConfig":{"schemaVersion":1,"identity":{"displayName":"库","applicationId":"cc.nkbr.library","versionName":"1.0.0","versionCode":1,"windowsExeName":"my-library"}},"iconPath":"icon.png","signingIdentityPath":"private/identity.bin"}"#,
             r#"{"op":"library_repackage_windows","templatePath":"shell.zip","outputPath":"out.zip","runtimeConfig":{"schemaVersion":1,"identity":{"displayName":"库","applicationId":"cc.nkbr.library","versionName":"1.0.0","versionCode":1,"windowsExeName":"my-library"}},"iconPath":"icon.png"}"#,
@@ -705,10 +726,12 @@ mod tests {
             r#"{"op":"library_download","sourceId":"s1","shareUrl":"https://www.lanzouw.com/a","destinationDirectory":"downloads"}"#,
         )
         .unwrap();
-        let catalog_search =
-            serde_json::from_str::<Command>(r#"{"op":"catalog_search","query":"x"}"#).unwrap();
+        let catalog_search = serde_json::from_str::<Command>(
+            r#"{"op":"catalog_search","storageRoot":"D:\\data","query":"x"}"#,
+        )
+        .unwrap();
         let catalog_download = serde_json::from_str::<Command>(
-            r#"{"op":"catalog_download","nodeId":"file:one","destinationDirectory":"downloads"}"#,
+            r#"{"op":"catalog_download","storageRoot":"D:\\data","nodeId":"file:one","destinationDirectory":"downloads"}"#,
         )
         .unwrap();
         assert!(matches!(

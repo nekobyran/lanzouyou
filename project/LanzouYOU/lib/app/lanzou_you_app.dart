@@ -6,8 +6,7 @@ import 'package:lanzou_library_shell/library_preview.dart';
 import '../controllers/app_controller.dart';
 import '../controllers/transfer_controller.dart';
 import '../pages/home/navigation_shell.dart';
-import '../pages/login/login_page.dart';
-import '../pages/public_library/public_library.dart';
+import '../pages/public_library/public_library_core.dart';
 import '../services/app_settings_store.dart';
 import '../services/cloud_service.dart';
 import '../services/rust_cloud_service.dart';
@@ -17,6 +16,7 @@ import '../services/public_library_storage.dart';
 import '../services/session_store.dart';
 import '../shared/app_motion.dart';
 import '../shared/app_theme.dart';
+import '../shared/windows_app_shell.dart';
 
 class LanzouYouApp extends StatefulWidget {
   const LanzouYouApp({
@@ -60,6 +60,7 @@ class LanzouYouApp extends StatefulWidget {
 }
 
 class _LanzouYouAppState extends State<LanzouYouApp> {
+  final _navigatorKey = GlobalKey<NavigatorState>();
   late final AppController _appController;
   late final TransferController _transferController;
 
@@ -91,6 +92,7 @@ class _LanzouYouAppState extends State<LanzouYouApp> {
     return ListenableBuilder(
       listenable: _appController,
       builder: (context, _) => MaterialApp(
+        navigatorKey: _navigatorKey,
         title: 'LanzouYOU',
         debugShowCheckedModeBanner: false,
         theme: AppTheme.light(),
@@ -100,39 +102,31 @@ class _LanzouYouAppState extends State<LanzouYouApp> {
           final media = MediaQuery.of(context);
           final reduceMotion =
               media.disableAnimations || _appController.reduceMotion;
+          final content = MediaQuery(
+            data: media.copyWith(disableAnimations: reduceMotion),
+            child: child ?? const SizedBox.shrink(),
+          );
           return AppMotionScope(
             reduceMotion: _appController.reduceMotion,
-            child: MediaQuery(
-              data: media.copyWith(disableAnimations: reduceMotion),
-              child: child ?? const SizedBox.shrink(),
+            child: AppWindowsShell(
+              navigatorKey: _navigatorKey,
+              title: 'LanzouYOU',
+              titleIcon: Icons.cloud_outlined,
+              closeTopTransientLayer: () => false,
+              child: content,
             ),
           );
         },
         home: AppMotionSwitcher(
-          child: switch (_appController.sessionStatus) {
-            SessionStatus.restoring => const _RestoringPage(
-              key: ValueKey('restoring'),
-            ),
-            SessionStatus.signedOut ||
-            SessionStatus.authenticating => LoginPage(
-              key: const ValueKey('login'),
-              controller: _appController,
-              publicLibraryBuilder: widget.publicLibraryCore == null
-                  ? null
-                  : (context) => PublicLibraryPage(
-                      controller: PublicLibraryController(
-                        core: widget.publicLibraryCore!,
-                      ),
-                    ),
-            ),
-            SessionStatus.signedIn => NavigationShell(
-              key: const ValueKey('shell'),
-              appController: _appController,
-              transferController: _transferController,
-              publicLibraryCore: widget.publicLibraryCore,
-              sourceRegistryCore: widget.sourceRegistryCore,
-            ),
-          },
+          child: _appController.sessionStatus == SessionStatus.restoring
+              ? const _RestoringPage(key: ValueKey('restoring'))
+              : NavigationShell(
+                  key: const ValueKey('shell'),
+                  appController: _appController,
+                  transferController: _transferController,
+                  publicLibraryCore: widget.publicLibraryCore,
+                  sourceRegistryCore: widget.sourceRegistryCore,
+                ),
         ),
       ),
     );

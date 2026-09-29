@@ -349,6 +349,16 @@ impl OperationRegistry {
         Ok(self.entry(operation_id)?.entry.status())
     }
 
+    fn pause(&self, operation_id: &str) -> CoreResult<OperationStatus> {
+        let handle = self.entry(operation_id)?;
+        Ok(handle.pause())
+    }
+
+    fn resume(&self, operation_id: &str) -> CoreResult<OperationStatus> {
+        let handle = self.entry(operation_id)?;
+        Ok(handle.resume())
+    }
+
     fn cancel(&self, operation_id: &str) -> CoreResult<OperationStatus> {
         let handle = self.entry(operation_id)?;
         Ok(handle.request_cancel())
@@ -386,6 +396,16 @@ pub(crate) fn begin(
 
 pub(crate) fn status(operation_id: &str) -> CoreResult<Value> {
     serde_json::to_value(REGISTRY.status(operation_id)?)
+        .map_err(|_| CoreError::new("internal_error", "操作状态序列化失败", false))
+}
+
+pub(crate) fn pause(operation_id: &str) -> CoreResult<Value> {
+    serde_json::to_value(REGISTRY.pause(operation_id)?)
+        .map_err(|_| CoreError::new("internal_error", "操作状态序列化失败", false))
+}
+
+pub(crate) fn resume(operation_id: &str) -> CoreResult<Value> {
+    serde_json::to_value(REGISTRY.resume(operation_id)?)
         .map_err(|_| CoreError::new("internal_error", "操作状态序列化失败", false))
 }
 

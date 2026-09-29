@@ -13,8 +13,8 @@ use super::{
     repackage_android::{encode_square_png, load_icon},
     repackage_common::{
         canonical_runtime_json, commit_file, ensure_distinct, entry_mut, read_archive,
-        response_output_path, sha256_file, temp_sibling, validate_runtime, write_archive,
-        ArchiveEntry, RuntimeIdentity,
+        response_output_path, temp_sibling, validate_runtime, write_archive, ArchiveEntry,
+        RuntimeIdentity,
     },
 };
 
@@ -36,7 +36,7 @@ pub(crate) struct WindowsRepackageRequest {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct WindowsRepackageResult {
     archive_path: String,
-    sha256: String,
+    bytes: u64,
     exe_name: String,
 }
 
@@ -82,12 +82,12 @@ pub(crate) fn repackage_windows(
         executable.name = exe_name.clone();
         write_archive(&temp, &entries, false)?;
         verify_windows_payload(&temp, &request.runtime_config, &identity, &exe_name)?;
-        let sha256 = sha256_file(&temp)?;
+        let bytes = fs::metadata(&temp).map_err(CoreError::io)?.len();
         commit_file(&temp, &output)?;
         let archive_path = response_output_path(&output)?;
         Ok(WindowsRepackageResult {
             archive_path,
-            sha256,
+            bytes,
             exe_name,
         })
     })();
@@ -364,7 +364,7 @@ mod tests {
         })
         .unwrap();
         assert_eq!(result.exe_name, "offline-library.exe");
-        assert_eq!(result.sha256.len(), 64);
+        assert_eq!(result.bytes, fs::metadata(&output).unwrap().len());
         let mut archive = ZipArchive::new(File::open(output).unwrap()).unwrap();
         assert!(archive.by_name(PLACEHOLDER_EXE).is_err());
         assert!(archive.by_name("offline-library.exe").is_ok());

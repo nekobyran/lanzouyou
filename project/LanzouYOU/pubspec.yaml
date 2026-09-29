@@ -8,7 +8,7 @@ environment:
 
 dependencies:
   archive: ^4.0.9
-  crypto: ^3.0.7
+  
   ffi: ^2.1.4
   file_picker: ^11.0.2
   flutter:

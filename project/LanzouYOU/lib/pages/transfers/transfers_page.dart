@@ -7,80 +7,121 @@ import '../../models/transfer_entry.dart';
 import '../../shared/app_motion.dart';
 
 class TransfersPage extends StatelessWidget {
-  const TransfersPage({required this.controller, super.key});
+  const TransfersPage({
+    required this.controller,
+    this.kindFilter,
+    this.title = '传输',
+    super.key,
+  });
 
   final TransferController controller;
+  final TransferKind? kindFilter;
+  final String title;
 
   @override
   Widget build(BuildContext context) {
     return ListenableBuilder(
       listenable: controller,
-      builder: (context, _) => Scaffold(
-        appBar: AppBar(
-          title: const Text('传输'),
-          actions: [
-            TextButton.icon(
-              onPressed: controller.entries.any(_isFinished)
-                  ? controller.clearFinished
-                  : null,
-              icon: const Icon(Icons.clear_all),
-              label: const Text('清除已完成'),
-            ),
-          ],
-        ),
-        body: AppMotionSwitcher(
-          child: controller.entries.isEmpty
-              ? const _TransferEmpty(key: ValueKey('empty-transfers'))
-              : Scrollbar(
-                  key: const ValueKey('transfer-list'),
-                  child: ListView.separated(
-                    padding: const EdgeInsets.only(bottom: 24),
-                    itemCount: controller.entries.length,
-                    separatorBuilder: (_, _) =>
-                        const Divider(height: 1, indent: 72),
-                    itemBuilder: (context, index) {
-                      final entry = controller.entries[index];
-                      return AppMotionListItem(
-                        key: ValueKey('transfer-motion-${entry.id}'),
-                        child: _TransferRow(
-                          entry: entry,
-                          onShowDetails: entry.directoryUploadResult == null
-                              ? null
-                              : () =>
-                                    _showDirectoryUploadDetails(context, entry),
-                          onCancel:
-                              entry.state == TransferState.queued ||
-                                  entry.state == TransferState.running
-                              ? () => unawaited(controller.cancel(entry.id))
-                              : null,
-                          onRetryIcon: entry.iconRetryAvailable
-                              ? () => controller.retryIconBinding(entry.id)
-                              : null,
-                        ),
-                      );
-                    },
+      builder: (context, _) {
+        final entries = kindFilter == null
+            ? controller.entries
+            : controller.entries
+                  .where((entry) => entry.kind == kindFilter)
+                  .toList(growable: false);
+        return Scaffold(
+          appBar: AppBar(
+            title: Text(title),
+            actions: [
+              TextButton.icon(
+                onPressed: entries.any(_isFinished)
+                    ? () => controller.clearFinished(kind: kindFilter)
+                    : null,
+                icon: const Icon(Icons.clear_all),
+                label: const Text('清除已完成'),
+              ),
+            ],
+          ),
+          body: AppMotionSwitcher(
+            child: entries.isEmpty
+                ? _TransferEmpty(
+                    key: ValueKey(
+                      kindFilter == TransferKind.download
+                          ? 'empty-downloads'
+                          : 'empty-transfers',
+                    ),
+                    title: kindFilter == TransferKind.download
+                        ? '还没有下载任务'
+                        : '还没有传输任务',
+                  )
+                : Scrollbar(
+                    key: ValueKey(
+                      kindFilter == TransferKind.download
+                          ? 'download-list'
+                          : 'transfer-list',
+                    ),
+                    child: ListView.separated(
+                      padding: const EdgeInsets.only(bottom: 24),
+                      itemCount: entries.length,
+                      separatorBuilder: (_, _) =>
+                          const Divider(height: 1, indent: 72),
+                      itemBuilder: (context, index) {
+                        final entry = entries[index];
+                        return AppMotionListItem(
+                          key: ValueKey('transfer-motion-${entry.id}'),
+                          child: _TransferRow(
+                            entry: entry,
+                            onShowDetails: entry.directoryUploadResult == null
+                                ? null
+                                : () => _showDirectoryUploadDetails(
+                                    context,
+                                    entry,
+                                  ),
+                            onPause: controller.canPause(entry.id)
+                                ? () => unawaited(controller.pause(entry.id))
+                                : null,
+                            onResume: controller.canResume(entry.id)
+                                ? () => unawaited(controller.resume(entry.id))
+                                : null,
+                            onCancel:
+                                entry.state == TransferState.queued ||
+                                    entry.state == TransferState.running ||
+                                    entry.state == TransferState.paused
+                                ? () => unawaited(controller.cancel(entry.id))
+                                : null,
+                            onRetryIcon: entry.iconRetryAvailable
+                                ? () => controller.retryIconBinding(entry.id)
+                                : null,
+                          ),
+                        );
+                      },
+                    ),
                   ),
-                ),
-        ),
-      ),
+          ),
+        );
+      },
     );
   }
 
   bool _isFinished(TransferEntry entry) =>
       entry.state != TransferState.queued &&
       entry.state != TransferState.running &&
+      entry.state != TransferState.paused &&
       entry.state != TransferState.cancelling;
 }
 
 class _TransferRow extends StatelessWidget {
   const _TransferRow({
     required this.entry,
+    this.onPause,
+    this.onResume,
     this.onCancel,
     this.onRetryIcon,
     this.onShowDetails,
   });
 
   final TransferEntry entry;
+  final VoidCallback? onPause;
+  final VoidCallback? onResume;
   final VoidCallback? onCancel;
   final VoidCallback? onRetryIcon;
   final VoidCallback? onShowDetails;
@@ -90,6 +131,7 @@ class _TransferRow extends StatelessWidget {
     final visual = _visual(entry);
     final isActive =
         entry.state == TransferState.running ||
+        entry.state == TransferState.paused ||
         entry.state == TransferState.cancelling;
     final byteProgress = isActive ? _byteProgress(entry) : null;
     return Semantics(
@@ -186,25 +228,49 @@ class _TransferRow extends StatelessWidget {
         ),
       );
     }
-    if (onCancel == null) return null;
-    final tooltip = entry.state == TransferState.queued
-        ? '取消排队'
-        : switch (entry.kind) {
-            TransferKind.upload => '取消上传',
-            TransferKind.directoryUpload => '取消文件夹上传',
-            TransferKind.download => '取消下载',
-          };
-    return Semantics(
-      key: ValueKey('cancel-transfer-${entry.state}'),
-      label: tooltip,
-      button: true,
-      child: IconButton(
-        tooltip: tooltip,
-        constraints: const BoxConstraints.tightFor(width: 48, height: 48),
-        onPressed: onCancel,
-        icon: const Icon(Icons.close),
-      ),
-    );
+    final actions = <Widget>[];
+    if (onPause != null) {
+      actions.add(
+        IconButton(
+          key: const Key('pause-transfer-action'),
+          tooltip: '暂停传输',
+          constraints: const BoxConstraints.tightFor(width: 48, height: 48),
+          onPressed: onPause,
+          icon: const Icon(Icons.pause_rounded),
+        ),
+      );
+    }
+    if (onResume != null) {
+      actions.add(
+        IconButton(
+          key: const Key('resume-transfer-action'),
+          tooltip: '继续传输',
+          constraints: const BoxConstraints.tightFor(width: 48, height: 48),
+          onPressed: onResume,
+          icon: const Icon(Icons.play_arrow_rounded),
+        ),
+      );
+    }
+    if (onCancel != null) {
+      final tooltip = entry.state == TransferState.queued
+          ? '取消排队'
+          : switch (entry.kind) {
+              TransferKind.upload => '取消上传',
+              TransferKind.directoryUpload => '取消文件夹上传',
+              TransferKind.download => '取消下载',
+            };
+      actions.add(
+        IconButton(
+          key: ValueKey('cancel-transfer-${entry.state}'),
+          tooltip: tooltip,
+          constraints: const BoxConstraints.tightFor(width: 48, height: 48),
+          onPressed: onCancel,
+          icon: const Icon(Icons.close),
+        ),
+      );
+    }
+    if (actions.isEmpty) return null;
+    return Row(mainAxisSize: MainAxisSize.min, children: actions);
   }
 
   _TransferVisual _visual(TransferEntry entry) {
@@ -231,6 +297,11 @@ class _TransferRow extends StatelessWidget {
           _primary,
         ),
       },
+      TransferState.paused => const _TransferVisual(
+        Icons.pause_circle_outline,
+        '已暂停，可继续或取消',
+        _neutral,
+      ),
       TransferState.cancelling => const _TransferVisual(
         Icons.cancel_outlined,
         '正在取消',
@@ -370,13 +441,15 @@ Color _neutral(BuildContext context) =>
     Theme.of(context).colorScheme.onSurfaceVariant;
 
 class _TransferEmpty extends StatelessWidget {
-  const _TransferEmpty({super.key});
+  const _TransferEmpty({this.title = '还没有传输任务', super.key});
+
+  final String title;
 
   @override
   Widget build(BuildContext context) {
     return Center(
       child: Semantics(
-        label: '暂无传输任务',
+        label: title,
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
@@ -386,7 +459,7 @@ class _TransferEmpty extends StatelessWidget {
               color: Theme.of(context).colorScheme.primary,
             ),
             const SizedBox(height: 16),
-            Text('暂无传输任务', style: Theme.of(context).textTheme.titleMedium),
+            Text(title, style: Theme.of(context).textTheme.titleMedium),
           ],
         ),
       ),

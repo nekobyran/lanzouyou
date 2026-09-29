@@ -839,6 +839,18 @@ pub fn js_data_fields(html: &str) -> CoreResult<BTreeMap<String, String>> {
     js_data_fields_with_context(html, html)
 }
 
+pub fn download_page_fields_with_context(
+    html: &str,
+    context: &str,
+) -> CoreResult<BTreeMap<String, String>> {
+    if let Ok(fields) = js_data_fields_with_context(html, context) {
+        return Ok(fields);
+    }
+    legacy_downprocess_fields(context)
+        .or_else(|| legacy_downprocess_fields(html))
+        .ok_or_else(|| CoreError::parse("下载页缺少下载参数"))
+}
+
 pub fn js_data_fields_with_context(
     html: &str,
     context: &str,
@@ -1017,8 +1029,89 @@ fn capture(text: &str, pattern: &str) -> Option<String> {
 }
 
 fn capture_variable(html: &str, name: &str) -> Option<String> {
-    let pattern = format!(r#"var\s+{}\s*=\s*['\"]?([^;'\"]+)"#, regex::escape(name));
+    let pattern = format!(
+        r#"(?:var|let|const)\s+{}\s*=\s*['\"]?([^;'\"]+)"#,
+        regex::escape(name)
+    );
     capture(html, &pattern)
+}
+
+fn legacy_downprocess_fields(html: &str) -> Option<BTreeMap<String, String>> {
+    let data_regex = Regex::new(r#"(?s)data\s*[:=]\s*\{([^}]+)\}"#).ok()?;
+    let pair_regex = Regex::new(r#"['\"]?([A-Za-z0-9_]+)['\"]?\s*:\s*([^,}]+)"#).ok()?;
+    let mut best: Option<(usize, BTreeMap<String, String>)> = None;
+    for capture in data_regex.captures_iter(html) {
+        let body = capture.get(1)?.as_str();
+        let mut fields = BTreeMap::new();
+        for pair in pair_regex.captures_iter(body) {
+            fields.insert(pair[1].to_owned(), legacy_js_value(html, pair[2].trim()));
+        }
+        if fields.get("action").map(String::as_str) == Some("downprocess") {
+            if best
+                .as_ref()
+                .map(|(len, _)| body.len() > *len)
+                .unwrap_or(true)
+            {
+                best = Some((body.len(), fields));
+            }
+        }
+    }
+    let mut fields = best.map(|(_, fields)| fields).unwrap_or_default();
+    fields
+        .entry("action".to_owned())
+        .or_insert_with(|| "downprocess".to_owned());
+    if !fields.contains_key("sign") {
+        if let Some(value) = capture(
+            html,
+            r#"(?is)(?:ajaxdata|sign)\s*[:=]\s*['\"]([^'\"]+)['\"]"#,
+        ) {
+            fields.insert("sign".to_owned(), value);
+        }
+    }
+    for key in ["websignkey", "signs", "websign", "kd", "ves"] {
+        if !fields.contains_key(key) {
+            if let Some(value) = capture(
+                html,
+                &format!(
+                    r#"(?is){}\s*[:=]\s*['\"]([^'\"]+)['\"]"#,
+                    regex::escape(key)
+                ),
+            ) {
+                fields.insert(key.to_owned(), value);
+            }
+        }
+    }
+    if fields
+        .get("sign")
+        .map(|value| !value.trim().is_empty())
+        .unwrap_or(false)
+    {
+        Some(fields)
+    } else {
+        None
+    }
+}
+
+fn legacy_js_value(html: &str, expression: &str) -> String {
+    let value = expression.trim();
+    if value.len() >= 2 {
+        let bytes = value.as_bytes();
+        if (bytes[0] == b'\'' && bytes[value.len() - 1] == b'\'')
+            || (bytes[0] == b'"' && bytes[value.len() - 1] == b'"')
+        {
+            return value[1..value.len() - 1].to_owned();
+        }
+    }
+    if value.chars().all(|ch| ch.is_ascii_digit()) {
+        return value.to_owned();
+    }
+    if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
+    {
+        return capture_variable(html, value).unwrap_or_default();
+    }
+    String::new()
 }
 
 fn string_field(value: &Value, key: &str) -> CoreResult<String> {
@@ -1111,7 +1204,10 @@ mod tests {
     fn test_ajax_endpoint_accepts_current_single_file_endpoint_family() {
         for (html, expected) in [
             (r#"$.ajax({url:'/ajax.php'});"#, "/ajax.php"),
-            (r#"$.ajax({url:'/ajaxm.php?file=42'});"#, "/ajaxm.php?file=42"),
+            (
+                r#"$.ajax({url:'/ajaxm.php?file=42'});"#,
+                "/ajaxm.php?file=42",
+            ),
             (
                 r#"$.ajax({type:'post',url:'/ajaxfile.php?file=315614084',data:{action:'downprocess'}});"#,
                 "/ajaxfile.php?file=315614084",

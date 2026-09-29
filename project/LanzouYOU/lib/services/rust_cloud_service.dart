@@ -8,7 +8,13 @@ import '../models/cloud_item.dart';
 import '../models/directory_upload.dart';
 import 'cloud_service.dart';
 
-class RustCloudService implements CloudService, CloudServiceLifecycle {
+class RustCloudService
+    implements
+        CloudService,
+        CloudServiceLifecycle,
+        CloudRuntimeCapabilitiesProvider,
+        CloudOperationPauseResume,
+        CloudAppUpdateProvider {
   RustCloudService()
     : this.testHarness(PersistentIsolateJsonCoreTransport.production());
 
@@ -26,20 +32,12 @@ class RustCloudService implements CloudService, CloudServiceLifecycle {
       response = await _transport.dispatch(jsonEncode(request));
     } on LibraryCoreFailure catch (error) {
       throw CloudFailure(error.code, error.message, retriable: error.retriable);
-    } on CloudFailure {
-      rethrow;
-    } on Object {
-      throw const CloudFailure(
-        'core_unavailable',
-        'LanzouYOU 核心不可用，请安装包含原生核心的完整版本',
-        retriable: true,
-      );
     }
     final Object? decoded;
     try {
       decoded = jsonDecode(response);
-    } on Object {
-      throw const CloudFailure('invalid_response', '核心返回了无效数据');
+    } on FormatException {
+      throw const CloudFailure('invalid_response', '核心返回了无效 JSON');
     }
     if (decoded is! Map) {
       throw const CloudFailure('invalid_response', '核心返回了无效数据');
@@ -47,16 +45,29 @@ class RustCloudService implements CloudService, CloudServiceLifecycle {
     final envelope = decoded.cast<String, Object?>();
     if (envelope['ok'] != true) {
       final rawError = envelope['error'];
-      final error = rawError is Map
-          ? rawError.cast<String, Object?>()
-          : const <String, Object?>{};
+      if (rawError is! Map) {
+        throw const CloudFailure('invalid_response', '核心错误响应缺少 error');
+      }
+      final error = rawError.cast<String, Object?>();
+      final code = error['code'];
+      final message = error['message'];
+      if (code is! String ||
+          code.isEmpty ||
+          message is! String ||
+          message.isEmpty) {
+        throw const CloudFailure('invalid_response', '核心错误响应字段无效');
+      }
+      final rawDetails = error['details'];
+      if (rawDetails != null && rawDetails is! Map) {
+        throw const CloudFailure('invalid_response', '核心错误详情字段无效');
+      }
       throw CloudFailure(
-        '${error['code'] ?? 'core_error'}',
-        '${error['message'] ?? '核心操作失败'}',
+        code,
+        message,
         retriable: error['retriable'] == true,
-        details: error['details'] is Map
-            ? (error['details'] as Map).cast<String, Object?>()
-            : const <String, Object?>{},
+        details: rawDetails == null
+            ? const <String, Object?>{}
+            : (rawDetails as Map).cast<String, Object?>(),
       );
     }
     final data = envelope['data'];
@@ -325,6 +336,41 @@ class RustCloudService implements CloudService, CloudServiceLifecycle {
       'destination': destination,
       'operationId': ?operationId,
     });
+  }
+
+  @override
+  Future<AppUpdateInfo?> appUpdateCheck(
+    String currentVersion, {
+    bool preferMirror = false,
+  }) async {
+    final data = await _request({
+      'op': 'app_update_check',
+      'currentVersion': currentVersion,
+      'preferMirror': preferMirror,
+    });
+    if (data.isEmpty) return null;
+    return AppUpdateInfo.fromJson(data);
+  }
+
+  @override
+  Future<RuntimeCapabilities> runtimeCapabilities() async {
+    return RuntimeCapabilities.fromJson(
+      await _request({'op': 'runtime_capabilities'}),
+    );
+  }
+
+  @override
+  Future<CloudOperationStatus> operationPause(String operationId) async {
+    return CloudOperationStatus.fromJson(
+      await _request({'op': 'operation_pause', 'operationId': operationId}),
+    );
+  }
+
+  @override
+  Future<CloudOperationStatus> operationResume(String operationId) async {
+    return CloudOperationStatus.fromJson(
+      await _request({'op': 'operation_resume', 'operationId': operationId}),
+    );
   }
 
   @override

@@ -513,9 +513,7 @@ mod tests {
             r#"{"zt":1,"text":"App.apk","info":"官网链接：https://example.test/"}"#,
             r#"{"zt":1,"text":[]}"#,
             r#"{"zt":1,"info":0,"text":[{"id":"100","name_all":"App.apk"}]}"#,
-            r#"{"zt":1,"text":[{}]}"#,
-            r#"{"zt":1,"text":[]}"#,
-            r#"{"zt":1,"info":0,"text":[{"id":"100","name_all":"App.apk"},{"id":"200","name_all":"New.apk"}]}"#,
+            r#"{"zt":1,"text":[{"id":"200"}]}"#,
             r#"{"zt":1,"text":[]}"#,
             r#"{"zt":1,"text":[]}"#,
             r#"{"zt":1,"text":"App.apk","info":"官网链接：https://example.test/"}"#,
@@ -523,6 +521,7 @@ mod tests {
             r#"{"zt":1,"text":[]}"#,
             r#"{"zt":1,"info":0,"text":[{"id":"200","name_all":"App.apk"}]}"#,
         ]);
+
         let session = authenticated_test_session(base);
         let directory = tempdir().unwrap();
         let path = directory.path().join("New.apk");
@@ -537,7 +536,7 @@ mod tests {
         assert_eq!(result["descriptionPreserved"], true);
         assert_eq!(result["oldDeleted"], true);
         let requests = requests.lock().unwrap();
-        assert_eq!(requests.len(), 12);
+        assert_eq!(requests.len(), 10);
         let rename = requests
             .iter()
             .position(|item| is_task(item, "46"))

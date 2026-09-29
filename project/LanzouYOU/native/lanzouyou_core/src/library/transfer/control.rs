@@ -45,16 +45,6 @@ pub(crate) struct WorkerLease {
     control_epoch: u64,
 }
 
-impl WorkerLease {
-    pub(crate) fn generation(self) -> u64 {
-        self.generation
-    }
-
-    pub(crate) fn control_epoch(self) -> u64 {
-        self.control_epoch
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum WorkerDirective {
     Continue,

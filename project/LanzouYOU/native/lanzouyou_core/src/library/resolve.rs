@@ -8,10 +8,11 @@ use crate::operation::OperationHandle;
 use super::{
     html::{capture, parse_page, strip},
     model::LibraryResolved,
+    network_profile::{self, NetworkScope},
     security::sanitize_access_code_error,
     session::{wait_cooperatively, LibraryTransport, ANDROID_USER_AGENT},
     url::{
-        join_page_url, join_verification_url, same_origin_endpoint,
+        join_page_url, join_verification_url, normalize_public_share_url, same_origin_endpoint,
         same_origin_verification_endpoint, validate_page_url, SecurityPolicy,
     },
 };
@@ -53,7 +54,7 @@ pub(crate) fn resolve(
         exchange_delays,
         operation,
     )
-    .map(|(_, resolved)| resolved)
+    .map(|(_, resolved, _)| resolved)
 }
 
 pub(crate) fn resolve_with_transport(
@@ -63,36 +64,47 @@ pub(crate) fn resolve_with_transport(
     policy: SecurityPolicy,
     exchange_delays: DirectExchangeDelays,
     operation: Option<&OperationHandle>,
-) -> CoreResult<(LibraryTransport, LibraryResolved)> {
+) -> CoreResult<(
+    LibraryTransport,
+    LibraryResolved,
+    network_profile::UserAgentProfile,
+)> {
     if source_id.trim().is_empty() {
         return Err(CoreError::invalid("sourceId 不能为空"));
     }
     if password.chars().count() > 64 || password.chars().any(char::is_control) {
         return Err(CoreError::invalid("分享密码格式无效"));
     }
-    validate_page_url(share_url, &policy)?;
-    let mut last = None;
-    for _ in 0..2 {
-        if let Some(operation) = operation {
+    let canonical_share = normalize_public_share_url(share_url, &policy)?;
+    validate_page_url(&canonical_share, &policy)?;
+    let routes = network_profile::candidates(&canonical_share, NetworkScope::Direct)?;
+    let attempt_policy = policy.clone();
+    let attempt_operation = operation.cloned();
+    let attempt_password = password.to_owned();
+    let (route, (transport, resolved)) = network_profile::race_candidates(routes, move |route| {
+        if let Some(operation) = attempt_operation.as_ref() {
             operation.check_cancelled()?;
         }
-        let transport = LibraryTransport::build(policy.clone())?;
-        match resolve_once(&transport, share_url, password, exchange_delays, operation) {
-            Ok(value) => return Ok((transport, value)),
-            Err(error)
-                if matches!(
-                    error.code,
-                    "cancelled" | "share_cancelled" | "password_required"
-                ) =>
-            {
-                return Err(error)
+        let transport = LibraryTransport::build(attempt_policy.clone())?;
+        let result = resolve_once(
+            &transport,
+            &route.url,
+            &attempt_password,
+            exchange_delays,
+            route.agent.user_agent(),
+            attempt_operation.as_ref(),
+        )
+        .map_err(|error| {
+            if error.code == "share_cancelled" {
+                error
+            } else {
+                sanitize_access_code_error(error, !attempt_password.is_empty())
             }
-            Err(error) => {
-                last = Some(sanitize_access_code_error(error, !password.is_empty()));
-            }
-        }
-    }
-    Err(last.unwrap_or_else(|| CoreError::remote("蓝奏直链解析失败", true)))
+        })?;
+        Ok((transport, result))
+    })?;
+    network_profile::observe_success(&canonical_share, NetworkScope::Direct, &route);
+    Ok((transport, resolved, route.agent))
 }
 
 fn resolve_once(
@@ -100,9 +112,11 @@ fn resolve_once(
     share_url: &str,
     password: &str,
     exchange_delays: DirectExchangeDelays,
+    user_agent: &str,
     operation: Option<&OperationHandle>,
 ) -> CoreResult<LibraryResolved> {
-    let share = transport.get_guarded_constrained(share_url, "", operation, None)?;
+    let share =
+        transport.get_guarded_with_agent_constrained(share_url, "", user_agent, operation, None)?;
     require_active_share(&share.html)?;
     let title = clean_file_name(&strip(&capture(
         &share.html,
@@ -119,8 +133,13 @@ fn resolve_once(
         share.clone()
     } else {
         let target = join_page_url(&share.url, &transfer, &transport.policy)?;
-        let page =
-            transport.get_guarded_constrained(target.as_str(), &share.url, operation, None)?;
+        let page = transport.get_guarded_with_agent_constrained(
+            target.as_str(),
+            &share.url,
+            user_agent,
+            operation,
+            None,
+        )?;
         require_active_share(&page.html)?;
         page
     };
@@ -207,7 +226,7 @@ fn resolve_once(
         ajax.as_str(),
         &form,
         &page.url,
-        ANDROID_USER_AGENT,
+        user_agent,
         operation,
         None,
     )?;
@@ -487,6 +506,7 @@ mod tests {
             &format!("{origin}/share"),
             "secret",
             DirectExchangeDelays::ZERO,
+            ANDROID_USER_AGENT,
             None,
         )
         .unwrap();
@@ -583,6 +603,7 @@ mod tests {
             &format!("{origin}/share"),
             "",
             DirectExchangeDelays::ZERO,
+            ANDROID_USER_AGENT,
             None,
         )
         .unwrap();
@@ -642,6 +663,7 @@ mod tests {
             &format!("{origin}/share"),
             "",
             DirectExchangeDelays::ZERO,
+            ANDROID_USER_AGENT,
             None,
         )
         .unwrap_err();

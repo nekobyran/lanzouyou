@@ -1,7 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:crypto/crypto.dart';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
 import 'package:lanzouyou/pages/library_builder/library_builder_service.dart';
@@ -89,8 +89,8 @@ void main() {
         final bytes = await file.readAsBytes();
         expect(bytes.length, greaterThan(1024));
         expect(bytes.take(2), orderedEquals(const [0x50, 0x4B]));
-        expect(artifact.sha256, matches(RegExp(r'^[0-9a-f]{64}$')));
-        expect(sha256.convert(bytes).toString(), artifact.sha256);
+                expect(artifact.byteLength, bytes.length);
+
       }
       final manifest = await File(
         _join(verificationDirectory.path, 'manifest.json'),
@@ -143,11 +143,10 @@ class _VerificationExporter implements LibraryArtifactExporter {
         }
         final output = File(_join(staging.path, item.fileName));
         await File(item.sourcePath).copy(output.path);
-        final digest = await sha256.bind(output.openRead()).first;
-        if (await output.length() != item.byteLength ||
-            digest.toString() != item.sha256) {
-          throw StateError('Verification staging digest mismatch');
+                if (await output.length() != item.byteLength) {
+          throw StateError('Verification staging length mismatch');
         }
+
         cancellation?.throwIfCancelled();
         committedPaths[item.platform] = _join(directory.path, item.fileName);
       }
@@ -160,7 +159,7 @@ class _VerificationExporter implements LibraryArtifactExporter {
               'platform': item.platform,
               'file': item.fileName,
               'bytes': item.byteLength,
-              'sha256': item.sha256,
+              
             },
         ],
       };

@@ -21,14 +21,12 @@
     {
       "target": "android",
       "file": "lanzou_library_shell_android.apk",
-      "bytes": 60579577,
-      "sha256": "9182fec375de48725bd8c44773104c5218dd68bba405a58f166a9a1948b301ac"
+      "bytes": 60579577
     },
     {
       "target": "windows",
       "file": "lanzou_library_shell_windows.zip",
-      "bytes": 17228547,
-      "sha256": "3311e9938eef32b16927783d5d905a5c9b09a4f76e79ded5c2079547d74f9d45"
+      "bytes": 17228547
     }
   ]
 }

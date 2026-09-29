@@ -51,6 +51,7 @@ class CloudOperationStatus {
       }),
       state: _requiredChoice(json, 'state', const <String>{
         'running',
+        'paused',
         'cancelling',
         'succeeded',
         'cancelled',
@@ -72,6 +73,106 @@ class CloudOperationStatus {
   final int bytesTransferred;
   final int totalBytes;
   final int itemsFound;
+}
+
+class AppUpdateInfo {
+  const AppUpdateInfo({
+    required this.version,
+    required this.body,
+    required this.assetName,
+    required this.size,
+    required this.githubUrl,
+    required this.downloadUrls,
+  });
+
+  factory AppUpdateInfo.fromJson(Map<String, Object?> json) {
+    final version = json['version'];
+    final body = json['body'];
+    final assetName = json['assetName'];
+    final size = json['size'];
+    final githubUrl = json['githubUrl'];
+    final downloadUrls = json['downloadUrls'];
+    if (version is! String ||
+        version.isEmpty ||
+        body is! String ||
+        assetName is! String ||
+        assetName.isEmpty ||
+        size is! int ||
+        size <= 0 ||
+        githubUrl is! String ||
+        githubUrl.isEmpty ||
+        downloadUrls is! List ||
+        downloadUrls.isEmpty ||
+        downloadUrls.any((value) => value is! String || value.isEmpty)) {
+      throw const CloudFailure('invalid_response', '核心返回的更新信息无效');
+    }
+    return AppUpdateInfo(
+      version: version,
+      body: body,
+      assetName: assetName,
+      size: size,
+      githubUrl: githubUrl,
+      downloadUrls: List<String>.unmodifiable(downloadUrls.cast<String>()),
+    );
+  }
+
+  final String version;
+  final String body;
+  final String assetName;
+  final int size;
+  final String githubUrl;
+  final List<String> downloadUrls;
+}
+
+abstract interface class CloudAppUpdateProvider {
+  Future<AppUpdateInfo?> appUpdateCheck(
+    String currentVersion, {
+    bool preferMirror = false,
+  });
+}
+
+class RuntimeCapabilities {
+  const RuntimeCapabilities({
+    required this.logicalCpus,
+    required this.networkWorkers,
+    required this.transferWorkers,
+    required this.asyncWorkers,
+    required this.blockingWorkers,
+  });
+
+  factory RuntimeCapabilities.fromJson(Map<String, Object?> json) {
+    int positive(String key) {
+      final value = json[key];
+      if (value is! int || value <= 0) {
+        throw CloudFailure('invalid_response', '核心返回的运行容量无效：$key');
+      }
+      return value;
+    }
+
+    return RuntimeCapabilities(
+      logicalCpus: positive('logicalCpus'),
+      networkWorkers: positive('networkWorkers'),
+      transferWorkers: positive('transferWorkers'),
+      asyncWorkers: positive('asyncWorkers'),
+      blockingWorkers: positive('blockingWorkers'),
+    );
+  }
+
+  final int logicalCpus;
+  final int networkWorkers;
+  final int transferWorkers;
+  final int asyncWorkers;
+  final int blockingWorkers;
+}
+
+abstract interface class CloudRuntimeCapabilitiesProvider {
+  Future<RuntimeCapabilities> runtimeCapabilities();
+}
+
+abstract interface class CloudOperationPauseResume {
+  Future<CloudOperationStatus> operationPause(String operationId);
+
+  Future<CloudOperationStatus> operationResume(String operationId);
 }
 
 abstract interface class CloudService {

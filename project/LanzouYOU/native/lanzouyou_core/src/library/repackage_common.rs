@@ -9,7 +9,7 @@ use std::{
 use regex::Regex;
 use serde::Deserialize;
 use serde_json::Value;
-use sha2::{Digest, Sha256};
+
 use zip::{write::SimpleFileOptions, CompressionMethod, DateTime, ZipArchive, ZipWriter};
 
 use crate::error::{CoreError, CoreResult};
@@ -482,20 +482,6 @@ pub(crate) fn ensure_distinct(template: &Path, output: &Path) -> CoreResult<()> 
     Ok(())
 }
 
-pub(crate) fn sha256_file(path: &Path) -> CoreResult<String> {
-    let mut file = File::open(path).map_err(CoreError::io)?;
-    let mut digest = Sha256::new();
-    let mut buffer = [0_u8; 65_536];
-    loop {
-        let read = file.read(&mut buffer).map_err(CoreError::io)?;
-        if read == 0 {
-            break;
-        }
-        digest.update(&buffer[..read]);
-    }
-    Ok(hex_lower(&digest.finalize()))
-}
-
 pub(crate) fn response_output_path(path: &Path) -> CoreResult<String> {
     let absolute = if path.is_absolute() {
         path.to_path_buf()
@@ -503,15 +489,6 @@ pub(crate) fn response_output_path(path: &Path) -> CoreResult<String> {
         std::env::current_dir().map_err(CoreError::io)?.join(path)
     };
     Ok(absolute.to_string_lossy().into_owned())
-}
-
-pub(crate) fn hex_lower(bytes: &[u8]) -> String {
-    let mut output = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        use std::fmt::Write as _;
-        let _ = write!(output, "{byte:02x}");
-    }
-    output
 }
 
 fn absolute_output(output: &Path) -> CoreResult<PathBuf> {

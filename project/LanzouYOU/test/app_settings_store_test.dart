@@ -6,6 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:lanzouyou/services/app_settings_store.dart';
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
   late Directory supportDirectory;
   late FileAppSettingsStore store;
 
@@ -22,6 +23,7 @@ void main() {
     if (await supportDirectory.exists()) {
       await supportDirectory.delete(recursive: true);
     }
+    await Future<void>.delayed(Duration.zero);
   });
 
   test('settings round-trip at the durable data/settings path', () async {

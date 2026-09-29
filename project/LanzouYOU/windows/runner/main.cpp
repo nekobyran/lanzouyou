@@ -24,9 +24,35 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
 
   project.set_dart_entrypoint_arguments(std::move(command_line_arguments));
 
+  constexpr unsigned int kDefaultWindowWidth = 1301;
+  constexpr unsigned int kDefaultWindowHeight = 855;
+  RECT work_area{};
+  const bool has_work_area =
+      ::SystemParametersInfo(SPI_GETWORKAREA, 0, &work_area, 0) != FALSE;
+  const unsigned int system_dpi = ::GetDpiForSystem();
+  const double scale_factor = system_dpi == 0 ? 1.0 : system_dpi / 96.0;
+  const unsigned int available_width = has_work_area
+                                           ? static_cast<unsigned int>(
+                                                 (work_area.right - work_area.left) /
+                                                 scale_factor)
+                                           : kDefaultWindowWidth;
+  const unsigned int available_height = has_work_area
+                                            ? static_cast<unsigned int>(
+                                                  (work_area.bottom - work_area.top) /
+                                                  scale_factor)
+                                            : kDefaultWindowHeight;
+  const unsigned int width =
+      kDefaultWindowWidth < available_width ? kDefaultWindowWidth
+                                            : available_width;
+  const unsigned int height =
+      kDefaultWindowHeight < available_height ? kDefaultWindowHeight
+                                              : available_height;
+
   FlutterWindow window(project);
-  Win32Window::Point origin(10, 10);
-  Win32Window::Size size(1280, 720);
+  // Keep aligned with AppUiTokens: centered and clamped 1301x855dp desktop default.
+  Win32Window::Point origin((available_width - width) / 2,
+                            (available_height - height) / 2);
+  Win32Window::Size size(width, height);
   if (!window.Create(L"LanzouYOU", origin, size)) {
     return EXIT_FAILURE;
   }
@@ -41,3 +67,4 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   ::CoUninitialize();
   return EXIT_SUCCESS;
 }
+

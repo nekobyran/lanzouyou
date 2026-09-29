@@ -1,14 +1,14 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, HashMap},
     fs::File,
     future::Future,
     io::{Seek, SeekFrom, Write},
     net::IpAddr,
-    sync::Arc,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
-use once_cell::sync::OnceCell;
+use once_cell::sync::{Lazy, OnceCell};
 use reqwest::{
     cookie::{CookieStore, Jar},
     header::{ACCEPT, ACCEPT_ENCODING, COOKIE, LOCATION, ORIGIN, REFERER, USER_AGENT},
@@ -36,16 +36,147 @@ use super::{
 
 pub(crate) const ANDROID_USER_AGENT: &str = "Mozilla/5.0 (Linux; Android 15; Pixel 9 Pro) AppleWebKit/537.36 Chrome/138 Mobile Safari/537.36";
 pub(crate) const DESKTOP_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36";
+pub(crate) const DESKTOP_EDGE_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36 Edg/138.0.0.0";
+pub(crate) const MOBILE_HUAWEI_USER_AGENT: &str = "Mozilla/5.0 (Linux; Android 15; BRQ-AN00) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Mobile Safari/537.36";
+pub(crate) const MOBILE_FIREFOX_USER_AGENT: &str =
+    "Mozilla/5.0 (Android 15; Mobile; rv:138.0) Gecko/138.0 Firefox/138.0";
 const MAX_TEXT_BYTES: u64 = 2 * 1024 * 1024;
 const DOWNLOAD_IDLE_TIMEOUT: Duration = Duration::from_secs(15);
 const CONSTRAINT_POLL_INTERVAL: Duration = Duration::from_millis(25);
-const LIBRARY_ASYNC_WORKERS: usize = 2;
-const LIBRARY_BLOCKING_WORKERS: usize = 8;
 
 // Tokio's DNS resolver and parts of reqwest use spawn_blocking. Keeping the
 // bounded runtime process-wide means cancelling a call can detach work that the
 // OS has already started without making LibraryTransport::drop wait for it.
 static LIBRARY_RUNTIME: OnceCell<tokio::runtime::Runtime> = OnceCell::new();
+
+static USER_VERIFICATION_COOKIES: Lazy<Mutex<HashMap<String, String>>> =
+    Lazy::new(|| Mutex::new(HashMap::new()));
+const VERIFICATION_COOKIE_ANY: &str = "*";
+
+pub(crate) fn import_user_verification_cookie(raw_url: &str, cookie: &str) -> CoreResult<usize> {
+    let url =
+        Url::parse(raw_url.trim()).map_err(|_| CoreError::invalid("蓝奏验证 Cookie 地址无效"))?;
+    let host = normalize_cookie_host(url.host_str().unwrap_or_default())
+        .ok_or_else(|| CoreError::invalid("蓝奏验证 Cookie 主机无效"))?;
+    if !is_lanzou_cookie_host(&host) {
+        return Err(CoreError::invalid("仅允许导入蓝奏验证 Cookie"));
+    }
+    let value = cookie.trim();
+    if value.is_empty() || value.chars().any(|ch| ch == '\r' || ch == '\n') {
+        return Err(CoreError::invalid("蓝奏验证 Cookie 为空或格式无效"));
+    }
+    let mut store = USER_VERIFICATION_COOKIES
+        .lock()
+        .map_err(|_| CoreError::new("internal_error", "蓝奏验证 Cookie 池不可用", true))?;
+    let mut written = 0usize;
+    for key in verification_cookie_keys(&host) {
+        store.insert(key, value.to_owned());
+        written += 1;
+    }
+    Ok(written)
+}
+
+fn verification_cookie_for_url(url: &Url) -> String {
+    let Some(host) = url.host_str().and_then(normalize_cookie_host) else {
+        return String::new();
+    };
+    let Ok(store) = USER_VERIFICATION_COOKIES.lock() else {
+        return String::new();
+    };
+    let mut values = Vec::new();
+    for key in verification_cookie_keys(&host) {
+        if let Some(value) = store.get(&key) {
+            if !value.is_empty() && !values.iter().any(|item: &String| item == value) {
+                values.push(value.clone());
+            }
+        }
+    }
+    merge_cookie_header_values(values)
+}
+
+fn verification_cookie_keys(host: &str) -> Vec<String> {
+    let mut keys = Vec::new();
+    if !host.is_empty() {
+        keys.push(host.to_owned());
+        if let Some(site) = lanzou_site_cookie_key(host) {
+            if !keys.iter().any(|value| value == &site) {
+                keys.push(site);
+            }
+        }
+    }
+    keys.push(VERIFICATION_COOKIE_ANY.to_owned());
+    keys
+}
+
+fn normalize_cookie_host(host: &str) -> Option<String> {
+    let mut value = host.trim().trim_end_matches('.').to_ascii_lowercase();
+    if value.is_empty() || !value.is_ascii() || value.contains('/') || value.contains(':') {
+        return None;
+    }
+    if !value.contains('.') && is_lanzou_cookie_prefix(&value) {
+        value.push_str(".com");
+    }
+    Some(value)
+}
+
+fn lanzou_site_cookie_key(host: &str) -> Option<String> {
+    let mut parts = host.rsplit('.');
+    let tld = parts.next()?;
+    let stem = parts.next()?;
+    Some(format!("{stem}.{tld}"))
+}
+
+fn is_lanzou_cookie_host(host: &str) -> bool {
+    if host.ends_with('.') || !host.is_ascii() {
+        return false;
+    }
+    let labels: Vec<&str> = host.split('.').collect();
+    if labels.len() < 2 || labels.iter().any(|label| label.is_empty()) {
+        return false;
+    }
+    let stem = labels[labels.len().saturating_sub(2)];
+    labels.last().is_some_and(|value| *value == "com") && is_lanzou_cookie_prefix(stem)
+}
+
+fn is_lanzou_cookie_prefix(value: &str) -> bool {
+    matches!(
+        value,
+        "lanzouw"
+            | "lanzoui"
+            | "lanzoub"
+            | "lanzouq"
+            | "lanzoux"
+            | "lanzouy"
+            | "lanzoup"
+            | "lanzout"
+            | "lanzous"
+            | "lanzouj"
+            | "lanzov"
+            | "laozouw"
+    )
+}
+
+fn merge_cookie_header_values(values: Vec<String>) -> String {
+    let mut pairs = BTreeMap::<String, String>::new();
+    for value in values {
+        for part in value.split(';') {
+            let trimmed = part.trim();
+            let Some((name, cookie_value)) = trimmed.split_once('=') else {
+                continue;
+            };
+            let name = name.trim();
+            let cookie_value = cookie_value.trim();
+            if !name.is_empty() && !cookie_value.is_empty() {
+                pairs.insert(name.to_owned(), cookie_value.to_owned());
+            }
+        }
+    }
+    pairs
+        .into_iter()
+        .map(|(name, value)| format!("{name}={value}"))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
 
 #[derive(Clone, Debug)]
 pub(crate) struct Page {
@@ -53,6 +184,7 @@ pub(crate) struct Page {
     pub html: String,
 }
 
+#[derive(Clone)]
 pub(crate) struct LibraryTransport {
     text_client: AsyncClient,
     download_client: AsyncClient,
@@ -129,6 +261,20 @@ impl LibraryTransport {
             cookies,
             policy,
         })
+    }
+
+    fn apply_user_verification_cookie(&self, url: &Url) {
+        let cookie = verification_cookie_for_url(url);
+        if cookie.is_empty() {
+            return;
+        }
+        for part in cookie.split(';') {
+            let pair = part.trim();
+            if pair.is_empty() || !pair.contains('=') {
+                continue;
+            }
+            self.cookies.add_cookie_str(&format!("{pair}; Path=/"), url);
+        }
     }
 
     pub(crate) fn get_guarded(&self, value: &str, referer: &str) -> CoreResult<Page> {
@@ -258,6 +404,7 @@ impl LibraryTransport {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn download_guarded_to(
         &self,
         value: &str,
@@ -276,12 +423,34 @@ impl LibraryTransport {
         .map(|result| result.response_bytes)
     }
 
+    #[cfg(test)]
     pub(crate) fn download_guarded_range_to(
         &self,
         value: &str,
         referer: &str,
         destination: &mut File,
         range: &RangeRequest,
+        operation: Option<&OperationHandle>,
+        control: Option<(&TransferControl, WorkerLease)>,
+    ) -> CoreResult<RangeTransferResult> {
+        self.download_guarded_range_to_with_agent(
+            value,
+            referer,
+            destination,
+            range,
+            ANDROID_USER_AGENT,
+            operation,
+            control,
+        )
+    }
+
+    pub(crate) fn download_guarded_range_to_with_agent(
+        &self,
+        value: &str,
+        referer: &str,
+        destination: &mut File,
+        range: &RangeRequest,
+        user_agent: &str,
         operation: Option<&OperationHandle>,
         control: Option<(&TransferControl, WorkerLease)>,
     ) -> CoreResult<RangeTransferResult> {
@@ -313,7 +482,7 @@ impl LibraryTransport {
             let client = self.download_client_for(&current)?;
             let request = client
                 .get(current.url.clone())
-                .header(USER_AGENT, ANDROID_USER_AGENT)
+                .header(USER_AGENT, user_agent)
                 .headers(range.headers()?)
                 .header(COOKIE, cookie_header)
                 .header(REFERER, referer.as_str());
@@ -560,7 +729,9 @@ impl LibraryTransport {
         } = constraints;
         check_constraints(operation, deadline)?;
         let url = self.validate_url(value, scope)?;
+        self.apply_user_verification_cookie(&url);
         let referer_url = self.validate_url(referer, scope)?;
+        self.apply_user_verification_cookie(&referer_url);
         if matches!(scope, UrlScope::Verification) {
             validate_verification_hop(&referer_url, url.as_str(), &self.policy)?;
         }
@@ -608,6 +779,10 @@ impl LibraryTransport {
         };
         for _ in 0..=5 {
             check_constraints(operation, deadline)?;
+            self.apply_user_verification_cookie(&current);
+            if let Some(referer) = &current_referer {
+                self.apply_user_verification_cookie(referer);
+            }
             let mut request = self
                 .text_client
                 .get(current.clone())
@@ -792,9 +967,11 @@ fn check_download_constraints(
 
 fn library_runtime() -> CoreResult<&'static tokio::runtime::Runtime> {
     LIBRARY_RUNTIME.get_or_try_init(|| {
+        let async_workers = crate::parallelism::runtime_async_workers();
+        let blocking_workers = crate::parallelism::runtime_blocking_workers();
         tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(LIBRARY_ASYNC_WORKERS)
-            .max_blocking_threads(LIBRARY_BLOCKING_WORKERS)
+            .worker_threads(async_workers)
+            .max_blocking_threads(blocking_workers)
             .thread_name("lanzou-library-runtime")
             .enable_all()
             .build()
@@ -1655,5 +1832,23 @@ mod tests {
         );
         assert_eq!(fs::metadata(path).unwrap().len(), 0);
         server.join().unwrap();
+    }
+
+    #[test]
+    fn test_user_verification_cookie_pool_reuses_site_and_global_keys() {
+        import_user_verification_cookie("https://wwc.lanzouw.com/s/demo", "x5sec=ok; acw_tc=kept")
+            .unwrap();
+        let exact = Url::parse("https://wwc.lanzouw.com/s/other").unwrap();
+        let sibling = Url::parse("https://www.lanzouw.com/b1").unwrap();
+        let other = Url::parse("https://www.lanzoux.com/b1").unwrap();
+        assert!(verification_cookie_for_url(&exact).contains("x5sec=ok"));
+        assert!(verification_cookie_for_url(&sibling).contains("acw_tc=kept"));
+        assert!(verification_cookie_for_url(&other).contains("x5sec=ok"));
+    }
+
+    #[test]
+    fn test_user_verification_cookie_rejects_non_lanzou_hosts() {
+        assert!(import_user_verification_cookie("https://example.com/", "x5sec=bad").is_err());
+        assert!(import_user_verification_cookie("https://www.lanzouw.com/", "bad\nvalue").is_err());
     }
 }

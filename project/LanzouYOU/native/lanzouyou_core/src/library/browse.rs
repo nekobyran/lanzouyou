@@ -19,9 +19,10 @@ use super::{
         LibraryCollectResult, LibraryFolder, LibraryItem, LibraryProbeResult, LibrarySource,
         LibrarySourceKind, PublicLibrarySource,
     },
+    network_profile::{self, NetworkScope, UserAgentProfile},
     rate_limit::RateLimiter,
     security::sanitize_access_code_error,
-    session::{LibraryTransport, ANDROID_USER_AGENT, DESKTOP_USER_AGENT},
+    session::LibraryTransport,
     url::{
         join_page_url, normalize_public_share_url, origin, parse_folder_target, safe_asset_url,
         same_origin_endpoint, validate_page_url, FolderTarget, SecurityPolicy,
@@ -34,9 +35,9 @@ const MAX_LIBRARY_SOURCES: usize = 4_096;
 const MAX_COLLECT_ROOTS: usize = 1_000;
 const MAX_COLLECT_FOLDERS: usize = 10_000;
 const MAX_COLLECT_FILES: usize = 50_000;
-const UNKNOWN_INITIAL_INTERVAL_MS: u64 = 2_100;
-const UNKNOWN_NEXT_INTERVAL_MS: u64 = 1_000;
-const MAX_PAGE_INTERVAL_MS: u64 = 8_400;
+const UNKNOWN_INITIAL_INTERVAL_MS: u64 = 640;
+const UNKNOWN_NEXT_INTERVAL_MS: u64 = 420;
+const MAX_PAGE_INTERVAL_MS: u64 = 4_200;
 const MAX_SOURCE_PROFILES: usize = 512;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -46,17 +47,18 @@ enum DirectoryAgent {
 }
 
 impl DirectoryAgent {
-    fn other(self) -> Self {
-        match self {
-            Self::Android => Self::Desktop,
-            Self::Desktop => Self::Android,
+    fn from_profile(profile: UserAgentProfile) -> Self {
+        if profile.is_desktop() {
+            Self::Desktop
+        } else {
+            Self::Android
         }
     }
 
-    fn user_agent(self) -> &'static str {
+    fn default_profile(self) -> UserAgentProfile {
         match self {
-            Self::Android => ANDROID_USER_AGENT,
-            Self::Desktop => DESKTOP_USER_AGENT,
+            Self::Android => UserAgentProfile::MobileChrome,
+            Self::Desktop => UserAgentProfile::DesktopChrome,
         }
     }
 
@@ -70,7 +72,6 @@ impl DirectoryAgent {
 
 #[derive(Clone, Debug)]
 struct SourceProfile {
-    preferred_directory: Option<DirectoryAgent>,
     android_template: html::PageTemplate,
     desktop_template: html::PageTemplate,
     android_initial_ms: u64,
@@ -82,7 +83,6 @@ struct SourceProfile {
 impl Default for SourceProfile {
     fn default() -> Self {
         Self {
-            preferred_directory: None,
             android_template: html::PageTemplate::Unknown,
             desktop_template: html::PageTemplate::Unknown,
             android_initial_ms: UNKNOWN_INITIAL_INTERVAL_MS,
@@ -163,14 +163,14 @@ fn template_initial_ms(
     peer_template: html::PageTemplate,
 ) -> u64 {
     match (agent, template) {
-        (DirectoryAgent::Desktop, html::PageTemplate::Minimal) => 2_100,
+        (DirectoryAgent::Desktop, html::PageTemplate::Minimal) => 560,
         (DirectoryAgent::Android, html::PageTemplate::Minimal)
             if peer_template == html::PageTemplate::Minimal =>
         {
-            1_800
+            520
         }
-        (DirectoryAgent::Android, html::PageTemplate::Minimal) => 2_100,
-        (_, html::PageTemplate::Classic) => 1_800,
+        (DirectoryAgent::Android, html::PageTemplate::Minimal) => 560,
+        (_, html::PageTemplate::Classic) => 520,
         (_, html::PageTemplate::Unknown) => UNKNOWN_INITIAL_INTERVAL_MS,
     }
 }
@@ -181,14 +181,14 @@ fn template_next_ms(
     peer_template: html::PageTemplate,
 ) -> u64 {
     match (agent, template) {
-        (DirectoryAgent::Desktop, html::PageTemplate::Minimal) => 1_000,
+        (DirectoryAgent::Desktop, html::PageTemplate::Minimal) => 360,
         (DirectoryAgent::Android, html::PageTemplate::Minimal)
             if peer_template == html::PageTemplate::Minimal =>
         {
-            500
+            320
         }
-        (DirectoryAgent::Android, html::PageTemplate::Minimal) => 800,
-        (_, html::PageTemplate::Classic) => 500,
+        (DirectoryAgent::Android, html::PageTemplate::Minimal) => 360,
+        (_, html::PageTemplate::Classic) => 320,
         (_, html::PageTemplate::Unknown) => UNKNOWN_NEXT_INTERVAL_MS,
     }
 }
@@ -230,17 +230,6 @@ impl SourceProfileStore {
         )
     }
 
-    fn preferred(&mut self, key: &str) -> Option<DirectoryAgent> {
-        let preferred = self
-            .profiles
-            .get(key)
-            .and_then(|profile| profile.preferred_directory);
-        if self.profiles.contains_key(key) {
-            self.touch(key);
-        }
-        preferred
-    }
-
     fn touch(&mut self, key: &str) {
         if let Some(index) = self.recency.iter().position(|candidate| candidate == key) {
             self.recency.remove(index);
@@ -278,20 +267,8 @@ fn with_source_profile<R>(key: &str, operation: impl FnOnce(&mut SourceProfile) 
         .with_profile(key, operation)
 }
 
-fn preferred_directory_agent(key: &str) -> DirectoryAgent {
-    SOURCE_PROFILES
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .preferred(key)
-        .unwrap_or(DirectoryAgent::Android)
-}
-
 fn observe_source_template(key: &str, agent: DirectoryAgent, template: html::PageTemplate) {
     with_source_profile(key, |profile| profile.observe_template(agent, template));
-}
-
-fn learn_directory_agent(key: &str, agent: DirectoryAgent) {
-    with_source_profile(key, |profile| profile.preferred_directory = Some(agent));
 }
 
 fn source_interval(key: &str, agent: DirectoryAgent, page: u32) -> Duration {
@@ -319,10 +296,11 @@ fn is_share_cancelled_error(error: &CoreError) -> bool {
 }
 
 fn is_terminal_source_error(error: &CoreError) -> bool {
-    matches!(
-        error.code,
-        "share_cancelled" | "password_required" | "cancelled"
-    )
+    // A single Lanzou base origin or UA can return a synthetic "分享已取消" shell
+    // for a still-valid /s, /u or b* share. Keep password/cancel terminal, but
+    // let share_cancelled participate in the normal route/UA fallback and only
+    // surface it when every candidate agrees.
+    matches!(error.code, "password_required" | "cancelled")
 }
 
 fn is_password_required_page(html: &str) -> bool {
@@ -368,7 +346,16 @@ fn load_directory_page(
     profile_key: &str,
     agent: DirectoryAgent,
 ) -> CoreResult<LoadedDirectoryPage> {
-    load_directory_page_with_constraints(source, target, transport, profile_key, agent, None, None)
+    load_directory_page_with_constraints(
+        source,
+        target,
+        transport,
+        profile_key,
+        agent,
+        agent.default_profile(),
+        None,
+        None,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -378,13 +365,14 @@ fn load_directory_page_with_constraints(
     transport: &LibraryTransport,
     profile_key: &str,
     agent: DirectoryAgent,
+    user_agent: UserAgentProfile,
     operation: Option<&OperationHandle>,
     deadline: Option<Instant>,
 ) -> CoreResult<LoadedDirectoryPage> {
     let response = transport.get_guarded_with_agent_constrained(
         &target.root_url,
         "",
-        agent.user_agent(),
+        user_agent.user_agent(),
         operation,
         deadline,
     )?;
@@ -517,6 +505,7 @@ pub(crate) struct Browser {
     target: FolderTarget,
     profile_key: String,
     agent: DirectoryAgent,
+    user_agent: UserAgentProfile,
     transport: LibraryTransport,
     limiter: Arc<RateLimiter>,
     page_url: String,
@@ -548,39 +537,43 @@ impl Browser {
         }
         let source = normalize_source_for_policy(source, &transport.policy)?;
         validate_source(&source)?;
-        let target = parse_folder_target(&source.share_url);
-        let profile_key = source_profile_key(&target.root_url);
-        let first = preferred_directory_agent(&profile_key);
-        let mut last_error = None;
-        for agent in [first, first.other()] {
-            if let Some(operation) = operation {
-                operation.check_cancelled()?;
-            }
-            match load_directory_page_with_constraints(
-                &source,
-                &target,
-                &transport,
-                &profile_key,
-                agent,
-                operation,
-                deadline,
-            ) {
-                Ok(loaded) => {
-                    return Ok(Self::from_loaded(
-                        source,
-                        target,
-                        profile_key,
-                        agent,
-                        transport,
-                        limiter,
-                        loaded,
-                    ));
+        let profile_key = source_profile_key(&source.share_url);
+        let routes = network_profile::candidates(&source.share_url, NetworkScope::FileList)?;
+        let attempt_source = source.clone();
+        let attempt_profile_key = profile_key.clone();
+        let attempt_transport = transport.clone();
+        let attempt_operation = operation.cloned();
+        let (route, (target, agent, winning_transport, loaded)) =
+            network_profile::race_candidates(routes, move |route| {
+                if let Some(operation) = attempt_operation.as_ref() {
+                    operation.check_cancelled()?;
                 }
-                Err(error) if is_terminal_source_error(&error) => return Err(error),
-                Err(error) => last_error = Some(error),
-            }
-        }
-        Err(last_error.unwrap_or_else(|| CoreError::remote("蓝奏目录暂不可用", true)))
+                let target = parse_folder_target(&route.url);
+                let agent = DirectoryAgent::from_profile(route.agent);
+                let route_transport = attempt_transport.clone();
+                let loaded = load_directory_page_with_constraints(
+                    &attempt_source,
+                    &target,
+                    &route_transport,
+                    &attempt_profile_key,
+                    agent,
+                    route.agent,
+                    attempt_operation.as_ref(),
+                    deadline,
+                )?;
+                Ok((target, agent, route_transport, loaded))
+            })?;
+        network_profile::observe_success(&source.share_url, NetworkScope::FileList, &route);
+        Ok(Self::from_loaded(
+            source,
+            target,
+            profile_key,
+            agent,
+            route.agent,
+            winning_transport,
+            limiter,
+            loaded,
+        ))
     }
 
     fn open_for_agent(
@@ -599,6 +592,7 @@ impl Browser {
             target,
             profile_key,
             agent,
+            agent.default_profile(),
             transport,
             limiter,
             loaded,
@@ -610,6 +604,7 @@ impl Browser {
         target: FolderTarget,
         profile_key: String,
         agent: DirectoryAgent,
+        user_agent: UserAgentProfile,
         transport: LibraryTransport,
         limiter: Arc<RateLimiter>,
         loaded: LoadedDirectoryPage,
@@ -619,6 +614,7 @@ impl Browser {
             target,
             profile_key,
             agent,
+            user_agent,
             transport,
             limiter,
             page_url: loaded.page_url,
@@ -628,6 +624,50 @@ impl Browser {
             search_endpoint: loaded.search_endpoint,
             single_item: loaded.single_item,
         }
+    }
+
+    fn reload_from_route_candidates(
+        &mut self,
+        scope: NetworkScope,
+        operation: Option<&OperationHandle>,
+        deadline: Option<Instant>,
+    ) -> CoreResult<()> {
+        let current_origin = origin(&self.page_url, &self.transport.policy).unwrap_or_default();
+        let mut routes = network_profile::candidates(&self.source.share_url, scope)?;
+        routes.retain(|route| route.origin != current_origin || route.agent != self.user_agent);
+        if routes.is_empty() {
+            return Err(CoreError::remote("没有其他可用的蓝奏线路", true));
+        }
+
+        let attempt_source = self.source.clone();
+        let attempt_profile_key = self.profile_key.clone();
+        let attempt_transport = self.transport.clone();
+        let attempt_operation = operation.cloned();
+        let (route, (target, agent, winning_transport, loaded)) =
+            network_profile::race_candidates(routes, move |route| {
+                if let Some(operation) = attempt_operation.as_ref() {
+                    operation.check_cancelled()?;
+                }
+                let target = parse_folder_target(&route.url);
+                let agent = DirectoryAgent::from_profile(route.agent);
+                let route_transport = attempt_transport.clone();
+                let loaded = load_directory_page_with_constraints(
+                    &attempt_source,
+                    &target,
+                    &route_transport,
+                    &attempt_profile_key,
+                    agent,
+                    route.agent,
+                    attempt_operation.as_ref(),
+                    deadline,
+                )?;
+                Ok((target, agent, route_transport, loaded))
+            })?;
+        network_profile::observe_success(&self.source.share_url, scope, &route);
+        self.target = target;
+        self.transport = winning_transport;
+        self.apply_loaded_page(agent, route.agent, loaded);
+        Ok(())
     }
 
     pub(crate) fn browse_page(&mut self, requested_page: u32) -> CoreResult<LibraryFolder> {
@@ -650,11 +690,9 @@ impl Browser {
         if self.single_item.is_some() {
             return self.browse_page_once_with_constraints(page_number, operation, deadline);
         }
-        let first_agent = self.agent;
         let mut empty = None;
         match self.browse_page_once_with_constraints(page_number, operation, deadline) {
             Ok(folder) if !folder.items.is_empty() => {
-                learn_directory_agent(&self.profile_key, self.agent);
                 return Ok(folder);
             }
             Ok(folder) => empty = Some(folder),
@@ -662,25 +700,13 @@ impl Browser {
             Err(_) => {}
         }
 
-        let alternate = first_agent.other();
-        match load_directory_page_with_constraints(
-            &self.source,
-            &self.target,
-            &self.transport,
-            &self.profile_key,
-            alternate,
-            operation,
-            deadline,
-        ) {
-            Ok(loaded) => self.apply_loaded_page(alternate, loaded),
-            Err(error) if is_terminal_source_error(&error) => return Err(error),
-            Err(error) => return empty.ok_or(error),
+        if let Err(error) =
+            self.reload_from_route_candidates(NetworkScope::FileList, operation, deadline)
+        {
+            return empty.ok_or(error);
         }
         match self.browse_page_once_with_constraints(page_number, operation, deadline) {
-            Ok(folder) if !folder.items.is_empty() => {
-                learn_directory_agent(&self.profile_key, self.agent);
-                Ok(folder)
-            }
+            Ok(folder) if !folder.items.is_empty() => Ok(folder),
             Ok(folder) => Ok(empty.unwrap_or(folder)),
             Err(error) if is_terminal_source_error(&error) => Err(error),
             Err(error) => empty.ok_or(error),
@@ -785,8 +811,14 @@ impl Browser {
         })
     }
 
-    fn apply_loaded_page(&mut self, agent: DirectoryAgent, loaded: LoadedDirectoryPage) {
+    fn apply_loaded_page(
+        &mut self,
+        agent: DirectoryAgent,
+        user_agent: UserAgentProfile,
+        loaded: LoadedDirectoryPage,
+    ) {
         self.agent = agent;
+        self.user_agent = user_agent;
         self.page_url = loaded.page_url;
         self.page = loaded.page;
         self.listing_endpoint = loaded.listing_endpoint;
@@ -813,38 +845,51 @@ impl Browser {
         if self.searchable() {
             return Ok(true);
         }
-        let response = self.transport.get_guarded_with_agent_constrained(
-            &self.target.root_url,
-            "",
-            DESKTOP_USER_AGENT,
-            operation,
-            deadline,
-        )?;
-        let parsed = html::parse_page(&response.html);
-        if parsed.cancelled {
-            return Err(share_cancelled_error());
-        }
-        if is_password_required_page(&response.html) {
-            return Err(password_required_error());
-        }
-        observe_source_template(&self.profile_key, DirectoryAgent::Desktop, parsed.template);
-        if parsed.search_endpoint.is_empty() || parsed.search_sign.is_empty() {
+
+        let routes =
+            network_profile::candidates(&self.source.share_url, NetworkScope::DirectorySearch)?;
+        let attempt_source = self.source.clone();
+        let attempt_profile_key = self.profile_key.clone();
+        let attempt_transport = self.transport.clone();
+        let attempt_operation = operation.cloned();
+        let result = network_profile::race_candidates(routes, move |route| {
+            if let Some(operation) = attempt_operation.as_ref() {
+                operation.check_cancelled()?;
+            }
+            let target = parse_folder_target(&route.url);
+            let agent = DirectoryAgent::from_profile(route.agent);
+            let route_transport = attempt_transport.clone();
+            let loaded = load_directory_page_with_constraints(
+                &attempt_source,
+                &target,
+                &route_transport,
+                &attempt_profile_key,
+                agent,
+                route.agent,
+                attempt_operation.as_ref(),
+                deadline,
+            )?;
+            if loaded.search_endpoint.is_empty() || loaded.page.search_sign.is_empty() {
+                return Err(CoreError::parse("当前线路未提供源内搜索能力"));
+            }
+            Ok((target, agent, route_transport, loaded))
+        });
+        let Ok((route, (target, agent, winning_transport, loaded))) = result else {
             return Ok(false);
-        }
-        self.search_endpoint = same_origin_endpoint(
-            &response.url,
-            &parsed.search_endpoint,
-            "/search/s.php",
-            &self.transport.policy,
-        )?
-        .to_string();
-        self.page.search_sign = parsed.search_sign;
-        self.page_url = response.url;
+        };
+        network_profile::observe_success(
+            &self.source.share_url,
+            NetworkScope::DirectorySearch,
+            &route,
+        );
+        self.target = target;
+        self.transport = winning_transport;
+        self.apply_loaded_page(agent, route.agent, loaded);
         Ok(true)
     }
 
     pub(crate) fn search_page_with_constraints(
-        &self,
+        &mut self,
         query: &str,
         page: u32,
         deadline: Option<Instant>,
@@ -864,31 +909,74 @@ impl Browser {
             form.insert("pwd".to_owned(), self.source.password.clone());
         }
         let context = self.item_context()?;
-        let agent = DirectoryAgent::Desktop;
-        let key = self.search_rate_key(agent);
-        for _ in 0..3 {
+        let current_origin = origin(&self.page_url, &self.transport.policy)?;
+        let mut profiles = vec![self.user_agent];
+        for profile in
+            network_profile::preferred_agents(&self.source.share_url, NetworkScope::ApiSearch)
+        {
+            if !profiles.contains(&profile) {
+                profiles.push(profile);
+            }
+        }
+
+        let mut last_error = None;
+        let mut saw_busy = false;
+        for profile in profiles {
+            if let Some(operation) = operation {
+                operation.check_cancelled()?;
+            }
+            let agent = DirectoryAgent::from_profile(profile);
+            let key = self.search_rate_key(profile);
             self.limiter.wait_with_interval_constrained(
                 &key,
                 deadline,
                 source_interval(&self.profile_key, agent, page),
                 operation,
             )?;
-            let raw = self.transport.post_form_constrained(
+            let raw = match self.transport.post_form_constrained(
                 &self.search_endpoint,
                 &form,
                 &self.page_url,
-                DESKTOP_USER_AGENT,
+                profile.user_agent(),
                 operation,
                 deadline,
-            )?;
-            match api::parse_search_page(&raw, &context)? {
-                PageState::Busy => self
-                    .limiter
-                    .defer(&key, source_backoff(&self.profile_key, agent, page))?,
-                state => return Ok(state),
+            ) {
+                Ok(raw) => raw,
+                Err(error) if is_terminal_source_error(&error) => return Err(error),
+                Err(error) => {
+                    last_error = Some(error);
+                    continue;
+                }
+            };
+            match api::parse_search_page(&raw, &context) {
+                Ok(PageState::Busy) => {
+                    saw_busy = true;
+                    self.limiter
+                        .defer(&key, source_backoff(&self.profile_key, agent, page))?;
+                }
+                Ok(state) => {
+                    network_profile::observe_success(
+                        &self.source.share_url,
+                        NetworkScope::ApiSearch,
+                        &network_profile::RouteCandidate {
+                            url: self.target.root_url.clone(),
+                            origin: current_origin.clone(),
+                            agent: profile,
+                        },
+                    );
+                    return Ok(state);
+                }
+                Err(error) => last_error = Some(error),
             }
         }
-        Err(CoreError::remote("源内搜索请求过快，请稍后重试", true))
+        if let Some(error) = last_error {
+            return Err(error);
+        }
+        if saw_busy {
+            Err(CoreError::remote("源内搜索请求过快，请稍后重试", true))
+        } else {
+            Err(CoreError::remote("源内搜索线路暂不可用", true))
+        }
     }
 
     pub(crate) fn source_title(&self) -> &str {
@@ -923,7 +1011,7 @@ impl Browser {
                 &self.listing_endpoint,
                 &form,
                 &self.page_url,
-                self.agent.user_agent(),
+                self.user_agent.user_agent(),
                 operation,
                 deadline,
             )?;
@@ -975,7 +1063,7 @@ impl Browser {
                 &self.folder_endpoint,
                 &form,
                 &self.page_url,
-                self.agent.user_agent(),
+                self.user_agent.user_agent(),
                 operation,
                 deadline,
             )?;
@@ -1036,8 +1124,13 @@ impl Browser {
         )
     }
 
-    fn search_rate_key(&self, agent: DirectoryAgent) -> String {
-        format!("search|{}|{}|{}", self.page_url, self.page.fid, agent.key())
+    fn search_rate_key(&self, profile: UserAgentProfile) -> String {
+        format!(
+            "search|{}|{}|{}",
+            self.page_url,
+            self.page.fid,
+            profile.key()
+        )
     }
 }
 
@@ -1057,7 +1150,6 @@ fn probe_inner(
     limiter: Arc<RateLimiter>,
 ) -> CoreResult<LibraryProbeResult> {
     let source = normalize_source_for_policy(source, &policy)?;
-    let profile_key = source_profile_key(&source.share_url);
     let mut best: Option<(DirectoryAgent, LibraryFolder, Duration)> = None;
     let mut searchable = false;
     let mut last_error = None;
@@ -1092,7 +1184,18 @@ fn probe_inner(
     }
     let (agent, mut folder, _) = best
         .ok_or_else(|| last_error.unwrap_or_else(|| CoreError::remote("蓝奏目录暂不可用", true)))?;
-    learn_directory_agent(&profile_key, agent);
+
+    if let Ok(route_origin) = origin(&source.share_url, &policy) {
+        network_profile::observe_success(
+            &source.share_url,
+            NetworkScope::FileList,
+            &network_profile::RouteCandidate {
+                url: source.share_url.clone(),
+                origin: route_origin,
+                agent: agent.default_profile(),
+            },
+        );
+    }
     folder.remote_search = searchable;
     Ok(LibraryProbeResult {
         source: PublicLibrarySource {
@@ -1312,6 +1415,119 @@ mod tests {
         }
     }
 
+    #[test]
+    fn plus_current_java_template_pacing_matches_rust_policy() {
+        let plus_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(
+            "../../../lanzouplus-public/app/src/main/java/cc/nkbr/lanzouplus/LanzouCore.java",
+        );
+        if !plus_path.exists() {
+            return;
+        }
+        let plus = std::fs::read_to_string(plus_path).unwrap();
+
+        for marker in [
+            "MINIMAL_ANDROID_INITIAL_PAGE_INTERVAL_MS=520",
+            "MINIMAL_ANDROID_NEXT_PAGE_INTERVAL_MS=320",
+            "MINIMAL_DESKTOP_INITIAL_PAGE_INTERVAL_MS=560",
+            "MINIMAL_DESKTOP_NEXT_PAGE_INTERVAL_MS=360",
+            "CLASSIC_REFLOW_ANDROID_INITIAL_PAGE_INTERVAL_MS=560",
+            "CLASSIC_REFLOW_ANDROID_NEXT_PAGE_INTERVAL_MS=360",
+            "CLASSIC_ANDROID_INITIAL_PAGE_INTERVAL_MS=520",
+            "CLASSIC_ANDROID_NEXT_PAGE_INTERVAL_MS=320",
+            "CLASSIC_DESKTOP_INITIAL_PAGE_INTERVAL_MS=520",
+            "CLASSIC_DESKTOP_NEXT_PAGE_INTERVAL_MS=320",
+            "UNKNOWN_INITIAL_PAGE_INTERVAL_MS=640",
+            "UNKNOWN_NEXT_PAGE_INTERVAL_MS=420",
+            "MAX_PAGE_INTERVAL_MS=4200",
+        ] {
+            assert!(
+                plus.contains(marker),
+                "Plus pacing marker drifted: {marker}"
+            );
+        }
+
+        assert_eq!(
+            template_initial_ms(
+                DirectoryAgent::Android,
+                html::PageTemplate::Minimal,
+                html::PageTemplate::Minimal,
+            ),
+            520
+        );
+        assert_eq!(
+            template_initial_ms(
+                DirectoryAgent::Android,
+                html::PageTemplate::Minimal,
+                html::PageTemplate::Classic,
+            ),
+            560
+        );
+        assert_eq!(
+            template_initial_ms(
+                DirectoryAgent::Desktop,
+                html::PageTemplate::Minimal,
+                html::PageTemplate::Unknown,
+            ),
+            560
+        );
+        assert_eq!(
+            template_next_ms(
+                DirectoryAgent::Android,
+                html::PageTemplate::Minimal,
+                html::PageTemplate::Minimal,
+            ),
+            320
+        );
+        assert_eq!(
+            template_next_ms(
+                DirectoryAgent::Android,
+                html::PageTemplate::Minimal,
+                html::PageTemplate::Classic,
+            ),
+            360
+        );
+        assert_eq!(
+            template_next_ms(
+                DirectoryAgent::Desktop,
+                html::PageTemplate::Minimal,
+                html::PageTemplate::Unknown,
+            ),
+            360
+        );
+        assert_eq!(
+            template_initial_ms(
+                DirectoryAgent::Android,
+                html::PageTemplate::Classic,
+                html::PageTemplate::Unknown,
+            ),
+            520
+        );
+        assert_eq!(
+            template_next_ms(
+                DirectoryAgent::Desktop,
+                html::PageTemplate::Classic,
+                html::PageTemplate::Unknown,
+            ),
+            320
+        );
+        assert_eq!(
+            template_initial_ms(
+                DirectoryAgent::Android,
+                html::PageTemplate::Unknown,
+                html::PageTemplate::Unknown,
+            ),
+            UNKNOWN_INITIAL_INTERVAL_MS
+        );
+        assert_eq!(
+            template_next_ms(
+                DirectoryAgent::Android,
+                html::PageTemplate::Unknown,
+                html::PageTemplate::Unknown,
+            ),
+            UNKNOWN_NEXT_INTERVAL_MS
+        );
+    }
+
     fn read_request(stream: &mut std::net::TcpStream) -> String {
         stream
             .set_read_timeout(Some(Duration::from_secs(2)))
@@ -1505,44 +1721,44 @@ mod tests {
     #[test]
     fn test_source_profile_matches_current_template_interval_matrix() {
         let unknown = SourceProfile::default();
-        assert_eq!(unknown.interval_ms(DirectoryAgent::Android, 1), 2_100);
-        assert_eq!(unknown.interval_ms(DirectoryAgent::Android, 2), 1_000);
-        assert_eq!(unknown.interval_ms(DirectoryAgent::Desktop, 1), 2_100);
-        assert_eq!(unknown.interval_ms(DirectoryAgent::Desktop, 2), 1_000);
+        assert_eq!(unknown.interval_ms(DirectoryAgent::Android, 1), 640);
+        assert_eq!(unknown.interval_ms(DirectoryAgent::Android, 2), 420);
+        assert_eq!(unknown.interval_ms(DirectoryAgent::Desktop, 1), 640);
+        assert_eq!(unknown.interval_ms(DirectoryAgent::Desktop, 2), 420);
 
         let mut minimal = SourceProfile::default();
         minimal.observe_template(DirectoryAgent::Android, html::PageTemplate::Minimal);
         minimal.observe_template(DirectoryAgent::Desktop, html::PageTemplate::Minimal);
-        assert_eq!(minimal.interval_ms(DirectoryAgent::Android, 1), 1_800);
-        assert_eq!(minimal.interval_ms(DirectoryAgent::Android, 2), 500);
-        assert_eq!(minimal.interval_ms(DirectoryAgent::Desktop, 1), 2_100);
-        assert_eq!(minimal.interval_ms(DirectoryAgent::Desktop, 2), 1_000);
+        assert_eq!(minimal.interval_ms(DirectoryAgent::Android, 1), 520);
+        assert_eq!(minimal.interval_ms(DirectoryAgent::Android, 2), 320);
+        assert_eq!(minimal.interval_ms(DirectoryAgent::Desktop, 1), 560);
+        assert_eq!(minimal.interval_ms(DirectoryAgent::Desktop, 2), 360);
 
         let mut classic = SourceProfile::default();
         classic.observe_template(DirectoryAgent::Android, html::PageTemplate::Classic);
         classic.observe_template(DirectoryAgent::Desktop, html::PageTemplate::Classic);
-        assert_eq!(classic.interval_ms(DirectoryAgent::Android, 1), 1_800);
-        assert_eq!(classic.interval_ms(DirectoryAgent::Android, 2), 500);
-        assert_eq!(classic.interval_ms(DirectoryAgent::Desktop, 1), 1_800);
-        assert_eq!(classic.interval_ms(DirectoryAgent::Desktop, 2), 500);
+        assert_eq!(classic.interval_ms(DirectoryAgent::Android, 1), 520);
+        assert_eq!(classic.interval_ms(DirectoryAgent::Android, 2), 320);
+        assert_eq!(classic.interval_ms(DirectoryAgent::Desktop, 1), 520);
+        assert_eq!(classic.interval_ms(DirectoryAgent::Desktop, 2), 320);
 
         let mut reflow = SourceProfile::default();
         reflow.observe_template(DirectoryAgent::Android, html::PageTemplate::Minimal);
         reflow.observe_template(DirectoryAgent::Desktop, html::PageTemplate::Classic);
-        assert_eq!(reflow.interval_ms(DirectoryAgent::Android, 1), 2_100);
-        assert_eq!(reflow.interval_ms(DirectoryAgent::Android, 2), 800);
+        assert_eq!(reflow.interval_ms(DirectoryAgent::Android, 1), 560);
+        assert_eq!(reflow.interval_ms(DirectoryAgent::Android, 2), 360);
     }
 
     #[test]
     fn test_source_profile_busy_backoff_is_isolated_by_ua_and_page_phase_and_caps() {
         let mut profile = SourceProfile::default();
+        assert_eq!(profile.backoff_ms(DirectoryAgent::Android, 1), 1_280);
+        assert_eq!(profile.backoff_ms(DirectoryAgent::Android, 1), 2_560);
         assert_eq!(profile.backoff_ms(DirectoryAgent::Android, 1), 4_200);
-        assert_eq!(profile.backoff_ms(DirectoryAgent::Android, 1), 8_400);
-        assert_eq!(profile.backoff_ms(DirectoryAgent::Android, 1), 8_400);
-        assert_eq!(profile.interval_ms(DirectoryAgent::Android, 2), 1_000);
-        assert_eq!(profile.interval_ms(DirectoryAgent::Desktop, 1), 2_100);
-        assert_eq!(profile.backoff_ms(DirectoryAgent::Android, 2), 2_000);
-        assert_eq!(profile.interval_ms(DirectoryAgent::Android, 1), 8_400);
+        assert_eq!(profile.interval_ms(DirectoryAgent::Android, 2), 420);
+        assert_eq!(profile.interval_ms(DirectoryAgent::Desktop, 1), 640);
+        assert_eq!(profile.backoff_ms(DirectoryAgent::Android, 2), 840);
+        assert_eq!(profile.interval_ms(DirectoryAgent::Android, 1), 4_200);
     }
 
     #[test]
@@ -1690,6 +1906,11 @@ mod tests {
             "分享需要正确的访问码",
             false,
         )));
+        assert!(!is_terminal_source_error(&CoreError::new(
+            "share_cancelled",
+            "分享已取消",
+            false,
+        )));
     }
 
     #[test]
@@ -1762,9 +1983,9 @@ mod tests {
         assert_eq!(folder.items[0].title, "恢复.apk");
         let key = source_profile_key(&format!("{origin}/source"));
         with_source_profile(&key, |profile| {
-            assert_eq!(profile.interval_ms(DirectoryAgent::Android, 1), 8_400);
-            assert_eq!(profile.interval_ms(DirectoryAgent::Android, 2), 800);
-            assert_eq!(profile.interval_ms(DirectoryAgent::Desktop, 1), 2_100);
+            assert_eq!(profile.interval_ms(DirectoryAgent::Android, 1), 2_240);
+            assert_eq!(profile.interval_ms(DirectoryAgent::Android, 2), 360);
+            assert_eq!(profile.interval_ms(DirectoryAgent::Desktop, 1), 640);
         });
     }
 
@@ -1839,22 +2060,21 @@ mod tests {
     fn test_source_profile_store_evicts_oldest_deterministically_without_dropping_current_key() {
         let mut store = SourceProfileStore::default();
         for index in 0..MAX_SOURCE_PROFILES {
-            store.with_profile(&format!("source-{index}"), |profile| {
-                profile.preferred_directory = Some(DirectoryAgent::Android);
-            });
+            store.with_profile(&format!("source-{index}"), |_| {});
         }
         store.with_profile("source-0", |profile| {
-            profile.preferred_directory = Some(DirectoryAgent::Desktop);
+            profile.android_template = html::PageTemplate::Classic;
         });
-        store.with_profile("source-overflow", |profile| {
-            profile.preferred_directory = Some(DirectoryAgent::Desktop);
-        });
+        store.with_profile("source-overflow", |_| {});
 
         assert_eq!(store.profiles.len(), MAX_SOURCE_PROFILES);
         assert!(store.profiles.contains_key("source-0"));
         assert!(store.profiles.contains_key("source-overflow"));
         assert!(!store.profiles.contains_key("source-1"));
-        assert_eq!(store.preferred("source-0"), Some(DirectoryAgent::Desktop));
+        assert_eq!(
+            store.profiles["source-0"].android_template,
+            html::PageTemplate::Classic
+        );
     }
 
     #[test]

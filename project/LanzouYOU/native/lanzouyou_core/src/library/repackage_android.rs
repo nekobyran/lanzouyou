@@ -29,7 +29,7 @@ use rsa::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
+
 use x509_cert::{
     der::{Decode, Encode},
     Certificate,
@@ -38,8 +38,8 @@ use x509_cert::{
 use crate::error::{CoreError, CoreResult};
 
 use super::repackage_common::{
-    canonical_runtime_json, commit_file, ensure_distinct, entry_mut, hex_lower, read_archive,
-    response_output_path, sha256_file, temp_sibling, validate_runtime, write_archive, ArchiveEntry,
+    canonical_runtime_json, commit_file, ensure_distinct, entry_mut, read_archive,
+    response_output_path, temp_sibling, validate_runtime, write_archive, ArchiveEntry,
     RuntimeIdentity,
 };
 
@@ -67,8 +67,8 @@ pub(crate) struct AndroidRepackageRequest {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct AndroidRepackageResult {
     apk_path: String,
-    sha256: String,
-    certificate_sha256: String,
+    bytes: u64,
+    signing_verified: bool,
     package_name: String,
     version_name: String,
     version_code: u32,
@@ -175,14 +175,13 @@ pub(crate) fn repackage_android(
             })?;
         verify_signed_payload(&signed, &identity, &request.runtime_config)?;
 
-        let sha256 = sha256_file(&signed)?;
-        let certificate_sha256 = hex_lower(&Sha256::digest(&signing_identity.certificate_der));
+        let bytes = fs::metadata(&signed).map_err(CoreError::io)?.len();
         commit_file(&signed, &output)?;
         let apk_path = response_output_path(&output)?;
         Ok(AndroidRepackageResult {
             apk_path,
-            sha256,
-            certificate_sha256,
+            bytes,
+            signing_verified: true,
             package_name: identity.application_id.clone(),
             version_name: identity.version_name.clone(),
             version_code: identity.version_code,
@@ -1015,16 +1014,13 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let path = temp.path().join("identity.bin");
         let first = load_or_create_identity(&path).unwrap();
-        let first_fingerprint = Sha256::digest(&first.certificate_der).to_vec();
+        let first_certificate = first.certificate_der.clone();
         let second = load_or_create_identity(&path).unwrap();
-        assert_eq!(
-            first_fingerprint,
-            Sha256::digest(&second.certificate_der).to_vec()
-        );
+        assert_eq!(first_certificate, second.certificate_der);
         let response = AndroidRepackageResult {
             apk_path: "x.apk".to_owned(),
-            sha256: "0".repeat(64),
-            certificate_sha256: hex_lower(&first_fingerprint),
+            bytes: 1,
+            signing_verified: true,
             package_name: "cc.nkbr.library".to_owned(),
             version_name: "1.0.0".to_owned(),
             version_code: 1,
@@ -1065,8 +1061,8 @@ mod tests {
         assert_eq!(result.package_name, "cc.nkbr.offline");
         assert_eq!(result.version_name, "1.2.3");
         assert_eq!(result.version_code, 3);
-        assert_eq!(result.sha256.len(), 64);
-        assert_eq!(result.certificate_sha256.len(), 64);
+        assert_eq!(result.bytes, fs::metadata(&output).unwrap().len());
+        assert!(result.signing_verified);
         Apk::new(output.clone()).unwrap().verify().unwrap();
 
         let mut archive = ZipArchive::new(File::open(output).unwrap()).unwrap();

@@ -9,10 +9,12 @@ mod icon;
 mod library;
 mod model;
 mod operation;
+mod parallelism;
 mod parser;
 mod replace;
 mod session;
 mod transfer;
+mod update;
 mod validation;
 
 pub use dispatch::dispatch_json;

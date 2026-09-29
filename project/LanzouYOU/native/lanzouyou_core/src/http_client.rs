@@ -87,6 +87,7 @@ impl HttpClient {
         let cookies = Arc::new(Jar::default());
         let follow = Client::builder()
             .use_rustls_tls()
+            .http1_only()
             .cookie_provider(cookies.clone())
             .timeout(Duration::from_secs(30))
             .connect_timeout(Duration::from_secs(10))
@@ -94,6 +95,7 @@ impl HttpClient {
             .map_err(CoreError::from_reqwest)?;
         let no_redirect = Client::builder()
             .use_rustls_tls()
+            .http1_only()
             .cookie_provider(cookies.clone())
             .redirect(Policy::none())
             .timeout(Duration::from_secs(30))

@@ -9,23 +9,46 @@ import 'package:lanzouyou/services/cloud_service.dart';
 import 'package:lanzouyou/services/session_store.dart';
 
 class MemorySessionStore implements SessionStore {
-  MemorySessionStore({this.cookie});
+  MemorySessionStore({String? cookie, StoredSessionVault? initialVault})
+    : vault =
+          initialVault ??
+          (cookie == null
+              ? const StoredSessionVault()
+              : StoredSessionVault(
+                  accounts: <StoredSessionAccount>[
+                    StoredSessionAccount(
+                      id: 'test-account',
+                      displayName: 'test-account',
+                      cookie: cookie,
+                    ),
+                  ],
+                  activeAccountId: 'test-account',
+                ));
 
-  String? cookie;
+  StoredSessionVault vault;
   int clearCount = 0;
+
+  String? get cookie {
+    final activeId = vault.activeAccountId;
+    if (activeId == null) return null;
+    for (final account in vault.accounts) {
+      if (account.id == activeId) return account.cookie;
+    }
+    return null;
+  }
 
   @override
   Future<void> clear() async {
     clearCount++;
-    cookie = null;
+    vault = const StoredSessionVault();
   }
 
   @override
-  Future<String?> readCookie() async => cookie;
+  Future<StoredSessionVault> read() async => vault;
 
   @override
-  Future<void> writeCookie(String cookie) async {
-    this.cookie = cookie;
+  Future<void> write(StoredSessionVault value) async {
+    vault = value;
   }
 }
 

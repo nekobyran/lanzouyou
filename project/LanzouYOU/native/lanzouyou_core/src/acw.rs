@@ -22,7 +22,7 @@ pub fn challenge_cookie(html: &str) -> CoreResult<Option<String>> {
 }
 
 fn challenge_argument(html: &str) -> CoreResult<Option<&str>> {
-    let regex = Regex::new(r#"arg1=['\"]([0-9A-Fa-f]{40})['\"]"#)
+    let regex = Regex::new(r#"arg1\s*=\s*['\"]([0-9A-Fa-f]+)['\"]"#)
         .map_err(|_| CoreError::parse("acw 规则初始化失败"))?;
     Ok(regex
         .captures(html)
@@ -31,7 +31,11 @@ fn challenge_argument(html: &str) -> CoreResult<Option<&str>> {
 }
 
 fn calculate_argument(arg: &str) -> CoreResult<String> {
+    if arg.len() != 40 {
+        return Err(CoreError::parse("acw_sc__v2 参数长度无效"));
+    }
     let mut unboxed = [b'0'; 40];
+
     for (index, byte) in arg.as_bytes().iter().enumerate() {
         let target = BOX
             .iter()
@@ -79,6 +83,15 @@ mod tests {
             challenge_cookie(html).unwrap().as_deref(),
             Some("d2c7186598ab1a508a4f6064e4fa746323ab17c6")
         );
-        assert_eq!(challenge_cookie("var arg1='1234'").unwrap(), None);
+        assert!(challenge_cookie("var arg1='1234'").is_err());
+    }
+
+    #[test]
+    fn test_challenge_cookie_accepts_assignment_whitespace() {
+        let html = "<script>var arg1 = '0123456789ABCDEF0123456789ABCDEF01234567';</script>";
+        assert_eq!(
+            challenge_cookie(html).unwrap().as_deref(),
+            Some("d2c7186598ab1a508a4f6064e4fa746323ab17c6")
+        );
     }
 }

@@ -1,17 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-const MAX_LOGICAL_SEARCH_SOURCES: usize = 4_096;
-
 fn first_page() -> u32 {
     1
-}
-
-fn default_concurrency() -> usize {
-    16
-}
-
-fn default_source_switch_delay_ms() -> u64 {
-    0
 }
 
 fn default_until_last_page() -> bool {
@@ -93,10 +83,8 @@ pub struct LibraryFolder {
 }
 
 #[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase", default)]
+#[serde(rename_all = "camelCase", default, deny_unknown_fields)]
 pub struct LibrarySearchOptions {
-    pub concurrency: usize,
-    pub source_switch_delay_ms: u64,
     pub until_last_page: bool,
     pub max_pages: u32,
 }
@@ -104,8 +92,6 @@ pub struct LibrarySearchOptions {
 impl Default for LibrarySearchOptions {
     fn default() -> Self {
         Self {
-            concurrency: default_concurrency(),
-            source_switch_delay_ms: default_source_switch_delay_ms(),
             until_last_page: default_until_last_page(),
             max_pages: 0,
         }
@@ -114,10 +100,6 @@ impl Default for LibrarySearchOptions {
 
 impl LibrarySearchOptions {
     pub(crate) fn normalized(mut self) -> Self {
-        self.concurrency = self.concurrency.clamp(1, MAX_LOGICAL_SEARCH_SOURCES);
-        if self.source_switch_delay_ms != 0 {
-            self.source_switch_delay_ms = self.source_switch_delay_ms.clamp(1_000, 60_000);
-        }
         self.max_pages = self.max_pages.min(1_000);
         self
     }
@@ -223,27 +205,18 @@ mod tests {
     }
 
     #[test]
-    fn test_search_options_keep_zero_as_rotation_disabled() {
+    fn test_search_options_only_bound_page_scope() {
         let options = LibrarySearchOptions {
-            concurrency: 100,
-            source_switch_delay_ms: 0,
             until_last_page: true,
             max_pages: 2_000,
         }
         .normalized();
-        assert_eq!(options.concurrency, 100);
-        assert_eq!(options.source_switch_delay_ms, 0);
         assert_eq!(options.max_pages, 1_000);
     }
 
     #[test]
-    fn test_search_options_cap_logical_sources_without_shrinking_to_http_pool() {
-        let options = LibrarySearchOptions {
-            concurrency: usize::MAX,
-            ..LibrarySearchOptions::default()
-        }
-        .normalized();
-        assert_eq!(options.concurrency, 4_096);
-        assert_eq!(options.source_switch_delay_ms, 0);
+    fn test_search_options_reject_caller_owned_concurrency() {
+        let request = r#"{"concurrency":16,"untilLastPage":true,"maxPages":0}"#;
+        assert!(serde_json::from_str::<LibrarySearchOptions>(request).is_err());
     }
 }

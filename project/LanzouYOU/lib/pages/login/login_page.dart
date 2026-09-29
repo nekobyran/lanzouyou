@@ -33,11 +33,14 @@ class _LoginPageState extends State<LoginPage> {
 
   Future<void> _submit() async {
     if (!(_formKey.currentState?.validate() ?? false)) return;
-    await widget.controller.login(
+    final succeeded = await widget.controller.login(
       _accountController.text,
       _passwordController.text,
     );
     _passwordController.clear();
+    if (succeeded && mounted && Navigator.of(context).canPop()) {
+      Navigator.of(context).pop();
+    }
   }
 
   Future<void> _openPublicLibrary() async {

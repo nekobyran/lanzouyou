@@ -8,6 +8,7 @@ import 'package:lanzouyou/pages/public_library/public_library.dart';
 import 'package:lanzouyou/services/app_settings_store.dart';
 import 'package:lanzouyou/services/cloud_service.dart';
 import 'package:lanzouyou/services/session_store.dart';
+import 'package:lanzouyou/shared/widgets/adaptive_navigation_bar.dart';
 
 void main() {
   if (kReleaseMode) {
@@ -83,7 +84,15 @@ bool _selectSettings(Element root) {
   void visit(Element element) {
     if (settingsIndex != null) return;
     final widget = element.widget;
-    if (widget is NavigationRail) {
+    if (widget is AppAdaptiveNavigationBar) {
+      final index = widget.destinations.indexWhere(
+        (destination) => destination.label == '设置',
+      );
+      if (index >= 0) {
+        selectDestination = widget.onDestinationSelected;
+        settingsIndex = index;
+      }
+    } else if (widget is NavigationRail) {
       final index = widget.destinations.indexWhere((destination) {
         final label = destination.label;
         return label is Text && label.data == '设置';
@@ -126,20 +135,28 @@ class _SettingsPreviewTestHarnessSettingsStore implements AppSettingsStore {
 }
 
 class _SettingsPreviewTestHarnessSessionStore implements SessionStore {
-  bool _available = true;
+  StoredSessionVault _vault = const StoredSessionVault(
+    accounts: <StoredSessionAccount>[
+      StoredSessionAccount(
+        id: 'preview-account',
+        displayName: 'preview-account',
+        cookie: 'settings-preview-session',
+      ),
+    ],
+    activeAccountId: 'preview-account',
+  );
 
   @override
-  Future<String?> readCookie() async =>
-      _available ? identityHashCode(this).toRadixString(36) : null;
+  Future<StoredSessionVault> read() async => _vault;
 
   @override
-  Future<void> writeCookie(String cookie) async {
-    _available = true;
+  Future<void> write(StoredSessionVault vault) async {
+    _vault = vault;
   }
 
   @override
   Future<void> clear() async {
-    _available = false;
+    _vault = const StoredSessionVault();
   }
 }
 
@@ -652,3 +669,4 @@ class _SettingsPreviewTestHarnessCloudService implements CloudService {
   @override
   Future<void> emptyRecycle() async => _unsupported();
 }
+

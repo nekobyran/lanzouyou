@@ -1,7 +1,6 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashSet, VecDeque};
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use sha2::{Digest, Sha256};
 
 use crate::error::{CoreError, CoreResult};
 
@@ -100,7 +99,7 @@ impl SourceRegistry {
         if !parent_id.is_empty() && nodes.is_empty() && !self.node_exists(parent_id)? {
             return Err(CoreError::invalid("catalog parentId 不存在"));
         }
-        let signature = catalog_cursor_signature(
+        let scope = catalog_cursor_scope(
             self.overlay.generation,
             parent_id,
             &request.category_id,
@@ -109,7 +108,7 @@ impl SourceRegistry {
         let offset = if request.cursor.is_empty() {
             0
         } else {
-            decode_catalog_cursor(&request.cursor, signature)?
+            decode_catalog_cursor(&request.cursor, &scope)?
         };
         if offset > nodes.len() {
             return Err(CoreError::invalid("catalog cursor 已失效"));
@@ -119,7 +118,7 @@ impl SourceRegistry {
             revision: self.catalog_revision(),
             total: nodes.len(),
             next_cursor: if end < nodes.len() {
-                encode_catalog_cursor(end, signature)
+                encode_catalog_cursor(end, &scope)
             } else {
                 String::new()
             },
@@ -428,15 +427,11 @@ impl SourceRegistry {
     }
 
     fn catalog_revision(&self) -> String {
-        let digest = Sha256::digest(
-            format!(
-                "{}\0{}",
-                self.baseline.summary().revision,
-                self.overlay.generation
-            )
-            .as_bytes(),
-        );
-        format!("registry-{}", hex_prefix(&digest, 12))
+        format!(
+            "registry:{}:{}",
+            self.baseline.summary().revision,
+            self.overlay.generation
+        )
     }
 }
 
@@ -563,33 +558,24 @@ fn fold_member(member: &StoredMember) -> String {
     format!("{}\n{}", member.title, member.description).to_lowercase()
 }
 
-fn catalog_cursor_signature(generation: u64, parent: &str, category: &str, query: &str) -> [u8; 8] {
-    Sha256::digest(format!("{generation}\0{parent}\0{category}\0{query}").as_bytes())[..8]
-        .try_into()
-        .expect("digest prefix")
+fn catalog_cursor_scope(generation: u64, parent: &str, category: &str, query: &str) -> String {
+    format!("{generation}\0{parent}\0{category}\0{query}")
 }
-fn encode_catalog_cursor(offset: usize, signature: [u8; 8]) -> String {
-    let mut bytes = Vec::with_capacity(16);
+fn encode_catalog_cursor(offset: usize, scope: &str) -> String {
+    let mut bytes = Vec::with_capacity(8 + scope.len());
     bytes.extend_from_slice(&(offset as u64).to_be_bytes());
-    bytes.extend_from_slice(&signature);
+    bytes.extend_from_slice(scope.as_bytes());
     URL_SAFE_NO_PAD.encode(bytes)
 }
-fn decode_catalog_cursor(value: &str, signature: [u8; 8]) -> CoreResult<usize> {
+fn decode_catalog_cursor(value: &str, scope: &str) -> CoreResult<usize> {
     let bytes = URL_SAFE_NO_PAD
         .decode(value)
         .map_err(|_| CoreError::invalid("catalog cursor 无效"))?;
-    if bytes.len() != 16 || bytes[8..] != signature {
+    if bytes.len() < 8 || bytes[8..] != *scope.as_bytes() {
         return Err(CoreError::invalid("catalog cursor 已失效"));
     }
     usize::try_from(u64::from_be_bytes(bytes[..8].try_into().expect("cursor")))
         .map_err(|_| CoreError::invalid("catalog cursor 超出范围"))
-}
-fn hex_prefix(bytes: &[u8], length: usize) -> String {
-    bytes
-        .iter()
-        .take(length)
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
 }
 
 #[cfg(test)]
@@ -607,7 +593,7 @@ mod tests {
             .batch_import(
                 0,
                 vec![SourceDraft {
-                    title: "Custom".to_owned(),
+                    title: "OverlayUniqueCustom2026".to_owned(),
                     url: "https://www.lanzouw.com/custom-visible".to_owned(),
                     password: "code".to_owned(),
                     searchable: true,
@@ -617,19 +603,22 @@ mod tests {
             .unwrap();
         let page = registry
             .merged_catalog_page(CatalogPageRequest {
-                query: "Custom".to_owned(),
+                query: "OverlayUniqueCustom2026".to_owned(),
                 ..CatalogPageRequest::default()
             })
             .unwrap();
         assert_eq!(page.nodes.len(), 1);
-        assert_eq!(page.nodes[0].title, "Custom");
+        assert_eq!(page.nodes[0].title, "OverlayUniqueCustom2026");
         let plan = registry.merged_search_plan("Custom", &[]).unwrap();
-        assert!(plan.sources.iter().any(|source| source.title == "Custom"));
+        assert!(plan
+            .sources
+            .iter()
+            .any(|source| source.title == "OverlayUniqueCustom2026"));
         let id = registry.snapshot().user_sources[0].id.clone();
         registry.delete_sources(1, vec![id]).unwrap();
         let page = registry
             .merged_catalog_page(CatalogPageRequest {
-                query: "Custom".to_owned(),
+                query: "OverlayUniqueCustom2026".to_owned(),
                 ..CatalogPageRequest::default()
             })
             .unwrap();

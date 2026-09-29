@@ -6,10 +6,11 @@ use serde_json::{json, Value};
 use crate::{
     error::{CoreError, CoreResult, Envelope},
     icon,
-    library::LibraryService,
+    library::{self, LibraryService},
     model::Command,
     operation::{self, OperationHandle, OperationKind},
     session::SessionClient,
+    update,
 };
 
 static SESSION: OnceCell<Mutex<SessionClient>> = OnceCell::new();
@@ -31,9 +32,43 @@ pub fn dispatch_json(request: &str) -> String {
 
 fn execute_global(command: Command) -> Envelope {
     let control = match &command {
+        Command::AppUpdateCheck {
+            current_version,
+            prefer_mirror,
+        } => Some(
+            update::check_android(current_version, *prefer_mirror).and_then(|info| {
+                serde_json::to_value(info)
+                    .map_err(|_| CoreError::new("internal_error", "更新信息序列化失败", false))
+            }),
+        ),
+        Command::RuntimeCapabilities => Some(Ok(json!({
+            "logicalCpus": crate::parallelism::device_parallelism(),
+            "networkWorkers": crate::parallelism::network_worker_capacity(),
+            "transferWorkers": crate::parallelism::transfer_worker_capacity(),
+            "asyncWorkers": crate::parallelism::runtime_async_workers(),
+            "blockingWorkers": crate::parallelism::runtime_blocking_workers(),
+        }))),
+        Command::LibraryImportVerificationCookie { url, cookie } => Some(
+            library::import_verification_cookie(url, cookie)
+                .map(|imported| json!({"imported": imported})),
+        ),
         Command::OperationStatus { operation_id } => Some(operation::status(operation_id)),
-        Command::OperationCancel { operation_id } => Some(operation::cancel(operation_id)),
-        Command::OperationForget { operation_id } => Some(operation::forget(operation_id)),
+        Command::OperationPause { operation_id } => Some(
+            library::pause_transfer_if_present(operation_id)
+                .and_then(|_| operation::pause(operation_id)),
+        ),
+        Command::OperationResume { operation_id } => Some(
+            library::resume_transfer_if_present(operation_id)
+                .and_then(|_| operation::resume(operation_id)),
+        ),
+        Command::OperationCancel { operation_id } => Some(
+            library::cancel_transfer_if_present(operation_id)
+                .and_then(|_| operation::cancel(operation_id)),
+        ),
+        Command::OperationForget { operation_id } => Some(
+            library::forget_transfer_if_present(operation_id)
+                .and_then(|_| operation::forget(operation_id)),
+        ),
         _ => None,
     };
     if let Some(result) = control {
@@ -259,12 +294,18 @@ pub(crate) fn execute(
         | Command::LibraryResolve { .. }
         | Command::LibraryDownload { .. }
         | Command::LibraryDescribe { .. }
+        | Command::LibraryReadDocument { .. }
         | Command::LibraryFetchAsset { .. }
         | Command::LibraryRepackageAndroid { .. }
         | Command::LibraryRepackageWindows { .. } => {
             return Err(CoreError::invalid("公共软件库命令必须由独立会话执行"))
         }
-        Command::OperationStatus { .. }
+        Command::AppUpdateCheck { .. }
+        | Command::RuntimeCapabilities
+        | Command::LibraryImportVerificationCookie { .. }
+        | Command::OperationStatus { .. }
+        | Command::OperationPause { .. }
+        | Command::OperationResume { .. }
         | Command::OperationCancel { .. }
         | Command::OperationForget { .. } => {
             return Err(CoreError::invalid("操作控制命令必须在会话锁外执行"))
@@ -360,14 +401,29 @@ mod tests {
 
     #[test]
     fn test_catalog_summary_and_page_dispatch_are_bounded_and_password_free() {
-        let summary_raw = dispatch_json(r#"{"op":"catalog_summary"}"#);
+        let root = tempfile::tempdir_in(std::env::temp_dir()).unwrap();
+        let storage_root = root.path().display().to_string();
+        let summary_raw = dispatch_json(
+            &serde_json::json!({
+                "op": "catalog_summary",
+                "storageRoot": storage_root,
+            })
+            .to_string(),
+        );
         let summary: Value = serde_json::from_str(&summary_raw).unwrap();
         assert_eq!(summary["ok"], true);
         assert_eq!(summary["data"]["officialCount"], 597);
         assert_eq!(summary["data"]["compositeCount"], 9);
         assert_eq!(summary["data"]["nodeCount"], 3_370);
 
-        let page_raw = dispatch_json(r#"{"op":"catalog_page","limit":200}"#);
+        let page_raw = dispatch_json(
+            &serde_json::json!({
+                "op": "catalog_page",
+                "storageRoot": storage_root,
+                "limit": 200,
+            })
+            .to_string(),
+        );
         let page: Value = serde_json::from_str(&page_raw).unwrap();
         assert_eq!(page["ok"], true);
         assert_eq!(page["data"]["total"], 606);
@@ -451,9 +507,19 @@ mod tests {
     }
 
     #[test]
+    fn test_library_import_verification_cookie_command_is_global_and_sanitized() {
+        let value = dispatch_json(
+            r#"{"op":"library_import_verification_cookie","url":"https://wwc.lanzouw.com/s/demo","cookie":"x5sec=ok; acw_tc=kept"}"#,
+        );
+        assert!(value.contains("\"ok\":true"));
+        assert!(value.contains("\"imported\":"));
+        assert!(!value.contains("x5sec=ok"));
+    }
+
+    #[test]
     fn test_catalog_operations_use_shared_search_download_registry_kinds() {
         let search = serde_json::from_str::<Command>(
-            r#"{"op":"catalog_search","query":"tool","operationId":"catalog-search-kind"}"#,
+            r#"{"op":"catalog_search","storageRoot":"D:\\data","query":"tool","operationId":"catalog-search-kind"}"#,
         )
         .unwrap();
         let search_operation = operation_for_command(&search).unwrap().unwrap();
@@ -465,7 +531,7 @@ mod tests {
         operation::forget("catalog-search-kind").unwrap();
 
         let download = serde_json::from_str::<Command>(
-            r#"{"op":"catalog_download","nodeId":"opaque","destinationDirectory":"downloads","operationId":"catalog-download-kind"}"#,
+            r#"{"op":"catalog_download","storageRoot":"D:\\data","nodeId":"opaque","destinationDirectory":"downloads","operationId":"catalog-download-kind"}"#,
         )
         .unwrap();
         let download_operation = operation_for_command(&download).unwrap().unwrap();

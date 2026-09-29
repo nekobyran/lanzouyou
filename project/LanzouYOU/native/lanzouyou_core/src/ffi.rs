@@ -36,7 +36,7 @@ pub unsafe extern "C" fn lanzouyou_dispatch(request: *const c_char) -> *mut c_ch
         ))
     });
     CString::new(result)
-        .unwrap_or_else(|_| CString::new("{\"ok\":false}").expect("static CString"))
+        .expect("JSON response must not contain interior NUL bytes")
         .into_raw()
 }
 
@@ -54,7 +54,8 @@ pub unsafe extern "C" fn lanzouyou_free(pointer: *mut c_char) {
 }
 
 fn failure_json(error: CoreError) -> String {
-    serde_json::to_string(&Envelope::failure(error)).unwrap_or_else(|_| "{\"ok\":false}".to_owned())
+    serde_json::to_string(&Envelope::failure(error))
+        .expect("failure envelope serialization must succeed")
 }
 
 #[cfg(test)]

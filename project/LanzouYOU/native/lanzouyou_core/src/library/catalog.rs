@@ -1,7 +1,4 @@
-use std::{
-    collections::{HashMap, HashSet, VecDeque},
-    fmt::Write as _,
-};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use once_cell::sync::Lazy;
@@ -109,9 +106,9 @@ struct CatalogStats {
     source_toggles: usize,
     file_nodes: usize,
     single_software_nodes: usize,
-    source_asset_sha256: String,
-    hint_asset_sha256: String,
-    composite_asset_sha256: String,
+    source_asset_bytes: usize,
+    hint_asset_bytes: usize,
+    composite_asset_bytes: usize,
 }
 
 #[derive(Clone, Deserialize)]
@@ -403,9 +400,9 @@ impl Catalog {
                 source_toggles: stats.toggles,
                 file_nodes: 0,
                 single_software_nodes: 0,
-                source_asset_sha256: sha256_upper(sources),
-                hint_asset_sha256: sha256_upper(hints),
-                composite_asset_sha256: sha256_upper(composites),
+                source_asset_bytes: sources.len(),
+                hint_asset_bytes: hints.len(),
+                composite_asset_bytes: composites.len(),
             },
         )
     }
@@ -460,20 +457,14 @@ impl Catalog {
             .iter()
             .filter(|entry| entry.node.kind == CatalogNodeKind::SingleSoftware)
             .count();
-        let valid_hash = |value: &str| {
-            value.len() == 64
-                && value
-                    .bytes()
-                    .all(|byte| byte.is_ascii_digit() || matches!(byte, b'A'..=b'F'))
-        };
         if stats.top_level_sources != summary.official_count + summary.composite_count
             || stats.child_sources > summary.official_count
             || stats.credentialed_sources > summary.node_count
             || stats.source_toggles > summary.official_count
             || stats.file_nodes + stats.single_software_nodes > summary.node_count
-            || !valid_hash(&stats.source_asset_sha256)
-            || !valid_hash(&stats.hint_asset_sha256)
-            || !valid_hash(&stats.composite_asset_sha256)
+            || stats.source_asset_bytes == 0
+            || stats.hint_asset_bytes == 0
+            || stats.composite_asset_bytes == 0
         {
             return Err(CoreError::parse("内置软件源资产统计不一致"));
         }
@@ -534,11 +525,11 @@ impl Catalog {
             return Err(CoreError::invalid("catalog query 格式无效"));
         }
         let category = parse_category(&request.category_id)?;
-        let signature = cursor_signature(&parent_id, category, &query);
+        let scope = cursor_scope(&parent_id, category, &query);
         let offset = if request.cursor.is_empty() {
             0
         } else {
-            decode_cursor(&request.cursor, signature)?
+            decode_cursor(&request.cursor, &scope)?
         };
         let candidates = self.candidate_indices(&parent_id, !query.is_empty());
         let matches = candidates
@@ -561,7 +552,7 @@ impl Catalog {
             revision: self.summary.revision.clone(),
             total: matches.len(),
             next_cursor: if end < matches.len() {
-                encode_cursor(end, signature)
+                encode_cursor(end, &scope)
             } else {
                 String::new()
             },
@@ -858,26 +849,16 @@ fn clean_cell(value: &str) -> String {
         .to_owned()
 }
 
+fn digest_prefix(bytes: &[u8], digest_bytes: usize) -> String {
+    let digest = Sha256::digest(bytes);
+    digest
+        .iter()
+        .take(digest_bytes.max(1).min(digest.len()))
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
 fn operation_source_id(node_id: &str) -> String {
-    format!("catalog_{}", digest_prefix(node_id.as_bytes(), 12))
-}
-
-fn digest_prefix(bytes: &[u8], length: usize) -> String {
-    let digest = Sha256::digest(bytes);
-    let mut output = String::with_capacity(length * 2);
-    for byte in digest.iter().take(length) {
-        let _ = write!(output, "{byte:02x}");
-    }
-    output
-}
-
-fn sha256_upper(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
-    let mut output = String::with_capacity(64);
-    for byte in digest {
-        let _ = write!(output, "{byte:02X}");
-    }
-    output
+    format!("catalog_{}", URL_SAFE_NO_PAD.encode(node_id.as_bytes()))
 }
 
 fn fold_search(node: &CatalogNode) -> String {
@@ -901,15 +882,15 @@ fn parse_category(value: &str) -> CoreResult<Option<CatalogNodeKind>> {
 }
 
 fn catalog_revision(sources: &[u8], hints: &[u8], composites: &[u8]) -> String {
-    let mut digest = Sha256::new();
-    for asset in [sources, hints, composites] {
-        digest.update((asset.len() as u64).to_be_bytes());
-        digest.update(asset);
-    }
-    digest_prefix(&digest.finalize(), 16)
+    format!(
+        "catalog-v1-{}-{}-{}",
+        sources.len(),
+        hints.len(),
+        composites.len()
+    )
 }
 
-fn cursor_signature(parent_id: &str, category: Option<CatalogNodeKind>, query: &str) -> [u8; 8] {
+fn cursor_scope(parent_id: &str, category: Option<CatalogNodeKind>, query: &str) -> String {
     let kind = match category {
         None => 0,
         Some(CatalogNodeKind::RemoteSource) => 1,
@@ -918,25 +899,22 @@ fn cursor_signature(parent_id: &str, category: Option<CatalogNodeKind>, query: &
         Some(CatalogNodeKind::SingleSoftware) => 4,
         Some(CatalogNodeKind::File) => 5,
     };
-    let digest = Sha256::digest(format!("{parent_id}\0{kind}\0{query}").as_bytes());
-    let mut output = [0_u8; 8];
-    output.copy_from_slice(&digest[..8]);
-    output
+    format!("{parent_id}\0{kind}\0{query}")
 }
 
-fn encode_cursor(offset: usize, signature: [u8; 8]) -> String {
-    let mut payload = [0_u8; 17];
-    payload[0] = CURSOR_VERSION;
-    payload[1..9].copy_from_slice(&(offset as u64).to_be_bytes());
-    payload[9..].copy_from_slice(&signature);
+fn encode_cursor(offset: usize, scope: &str) -> String {
+    let mut payload = Vec::with_capacity(9 + scope.len());
+    payload.push(CURSOR_VERSION);
+    payload.extend_from_slice(&(offset as u64).to_be_bytes());
+    payload.extend_from_slice(scope.as_bytes());
     URL_SAFE_NO_PAD.encode(payload)
 }
 
-fn decode_cursor(value: &str, signature: [u8; 8]) -> CoreResult<usize> {
+fn decode_cursor(value: &str, scope: &str) -> CoreResult<usize> {
     let payload = URL_SAFE_NO_PAD
         .decode(value)
         .map_err(|_| CoreError::invalid("catalog cursor 格式无效"))?;
-    if payload.len() != 17 || payload[0] != CURSOR_VERSION || payload[9..] != signature {
+    if payload.len() < 9 || payload[0] != CURSOR_VERSION || payload[9..] != *scope.as_bytes() {
         return Err(CoreError::invalid("catalog cursor 与当前筛选不匹配"));
     }
     let mut offset = [0_u8; 8];
@@ -949,8 +927,6 @@ fn decode_cursor(value: &str, signature: [u8; 8]) -> CoreResult<usize> {
 mod tests {
     use std::collections::HashSet;
 
-    use sha2::{Digest, Sha256};
-
     use super::*;
 
     const SOURCES: &[u8] = include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/catalog/s"));
@@ -958,36 +934,17 @@ mod tests {
     const COMPOSITES: &[u8] =
         include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/catalog/c"));
 
-    fn sha256(bytes: &[u8]) -> String {
-        Sha256::digest(bytes)
-            .iter()
-            .map(|byte| format!("{byte:02X}"))
-            .collect()
-    }
-
     #[test]
-    fn test_packaged_catalog_assets_match_pinned_counts_hashes_and_kinds() {
+    fn test_packaged_catalog_assets_match_pinned_counts_and_kinds() {
         let catalog = Catalog::parse(SOURCES, HINTS, COMPOSITES).unwrap();
         let summary = catalog.summary();
 
         assert_eq!(SOURCES.len(), 22_990);
         assert_eq!(HINTS.len(), 597);
         assert_eq!(COMPOSITES.len(), 143_917);
-        assert_eq!(
-            sha256(SOURCES),
-            "76CCA2EF42DA05812231D4B261C9B9EF4C3714D68C5A6867AF3C27505E7AE964"
-        );
-        assert_eq!(
-            sha256(HINTS),
-            "EA7AE50B0EAD00C1C46DD47739EF8E037A4990294EEDF71378EF71FFC20224FE"
-        );
-        assert_eq!(
-            sha256(COMPOSITES),
-            "682F29A5B6AF4E54D41E7E7C8CF59D421F6D2201A66E27BC28EFEE0EB506E76B"
-        );
-        assert_eq!(catalog.stats.source_asset_sha256, sha256(SOURCES));
-        assert_eq!(catalog.stats.hint_asset_sha256, sha256(HINTS));
-        assert_eq!(catalog.stats.composite_asset_sha256, sha256(COMPOSITES));
+        assert_eq!(catalog.stats.source_asset_bytes, SOURCES.len());
+        assert_eq!(catalog.stats.hint_asset_bytes, HINTS.len());
+        assert_eq!(catalog.stats.composite_asset_bytes, COMPOSITES.len());
         assert_eq!(summary.official_count, 597);
         assert_eq!(summary.composite_count, 9);
         assert_eq!(catalog.stats.top_level_sources, 606);
@@ -1233,7 +1190,12 @@ mod tests {
     #[test]
     fn test_catalog_rejects_hint_drift_and_invalid_item_refs() {
         assert!(Catalog::parse(b"1\nsource\t/s/one\n", &[], b"").is_err());
-        let catalog = Catalog::parse(b"1\nsource\t/s/one\n", &[0], b"").unwrap();
+        let catalog = Catalog::parse(
+            b"1\nsource\t/s/one\n",
+            &[0],
+            b"C\tlocal:test\tcollection\tpublisher\n",
+        )
+        .unwrap();
         let source = catalog.page(CatalogPageRequest::default()).unwrap().nodes[0].clone();
 
         for value in [

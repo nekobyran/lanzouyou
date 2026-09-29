@@ -21,6 +21,7 @@ enum TransferStage {
 enum TransferState {
   queued,
   running,
+  paused,
   cancelling,
   cancelled,
   succeeded,

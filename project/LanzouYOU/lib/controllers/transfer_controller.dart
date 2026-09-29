@@ -26,16 +26,19 @@ class TransferController extends ChangeNotifier {
   final Queue<_TransferJob> _queue = Queue<_TransferJob>();
   final Map<int, Completer<bool>> _cancelDecisions = <int, Completer<bool>>{};
   final Map<int, _IconRetry> _iconRetries = <int, _IconRetry>{};
-  _TransferJob? _activeJob;
-  _OperationPoller? _activePoller;
+  final Map<int, _TransferJob> _activeJobs = <int, _TransferJob>{};
+  final Map<int, _OperationPoller> _activePollers = <int, _OperationPoller>{};
   int _nextId = 1;
-  bool _draining = false;
+  int? _transferCapacity;
+  Future<int>? _transferCapacityFuture;
+  bool _admitting = false;
   bool _disposed = false;
 
   List<TransferEntry> get entries => List.unmodifiable(_entries);
   bool get hasRunning => _entries.any(
     (entry) =>
         entry.state == TransferState.running ||
+        entry.state == TransferState.paused ||
         entry.state == TransferState.cancelling,
   );
 
@@ -225,6 +228,88 @@ class TransferController extends ChangeNotifier {
     return true;
   }
 
+  bool canPause(int id) {
+    final index = _entries.indexWhere((entry) => entry.id == id);
+    if (index < 0 || cloudService is! CloudOperationPauseResume) return false;
+    final entry = _entries[index];
+    return entry.state == TransferState.running &&
+        entry.kind != TransferKind.upload;
+  }
+
+  bool canResume(int id) {
+    final index = _entries.indexWhere((entry) => entry.id == id);
+    if (index < 0 || cloudService is! CloudOperationPauseResume) return false;
+    final entry = _entries[index];
+    return entry.state == TransferState.paused &&
+        entry.kind != TransferKind.upload;
+  }
+
+  Future<bool> pause(int id) async {
+    if (!canPause(id)) return false;
+    final service = cloudService as CloudOperationPauseResume;
+    final index = _entries.indexWhere((entry) => entry.id == id);
+    if (index < 0) return false;
+    final entry = _entries[index];
+    try {
+      final status = await service.operationPause(entry.operationId);
+      if (status.operationId != entry.operationId ||
+          status.kind != entry.kind.coreName ||
+          status.state != 'paused') {
+        return false;
+      }
+      final currentIndex = _entries.indexWhere((value) => value.id == id);
+      if (currentIndex < 0) return false;
+      final current = _entries[currentIndex];
+      if (current.state != TransferState.running) return false;
+      _entries[currentIndex] = current.copyWith(
+        state: TransferState.paused,
+        bytesTransferred: status.bytesTransferred,
+        totalBytes: status.totalBytes > 0
+            ? status.totalBytes
+            : current.totalBytes,
+        completedUnits: status.completedUnits,
+        totalUnits: status.totalUnits,
+      );
+      _notify();
+      return true;
+    } on Object {
+      return false;
+    }
+  }
+
+  Future<bool> resume(int id) async {
+    if (!canResume(id)) return false;
+    final service = cloudService as CloudOperationPauseResume;
+    final index = _entries.indexWhere((entry) => entry.id == id);
+    if (index < 0) return false;
+    final entry = _entries[index];
+    try {
+      final status = await service.operationResume(entry.operationId);
+      if (status.operationId != entry.operationId ||
+          status.kind != entry.kind.coreName ||
+          status.state != 'running') {
+        return false;
+      }
+      final currentIndex = _entries.indexWhere((value) => value.id == id);
+      if (currentIndex < 0) return false;
+      final current = _entries[currentIndex];
+      if (current.state != TransferState.paused) return false;
+      _entries[currentIndex] = current.copyWith(
+        state: TransferState.running,
+        bytesTransferred: status.bytesTransferred,
+        totalBytes: status.totalBytes > 0
+            ? status.totalBytes
+            : current.totalBytes,
+        completedUnits: status.completedUnits,
+        totalUnits: status.totalUnits,
+      );
+      _notify();
+      return true;
+    } on Object {
+      return false;
+    }
+  }
+
   Future<bool> cancel(int id) async {
     final index = _entries.indexWhere((entry) => entry.id == id);
     if (index < 0) return false;
@@ -233,7 +318,10 @@ class TransferController extends ChangeNotifier {
     if (entry.state == TransferState.cancelling) {
       return _cancelDecisions[id]?.future ?? true;
     }
-    if (entry.state != TransferState.running) return false;
+    if (entry.state != TransferState.running &&
+        entry.state != TransferState.paused) {
+      return false;
+    }
 
     final decision = Completer<bool>();
     _cancelDecisions[id] = decision;
@@ -252,11 +340,11 @@ class TransferController extends ChangeNotifier {
       // During icon preparation the operation is intentionally not registered
       // yet. A local cancellation remains authoritative and prevents upload.
       final accepted = error.code == 'operation_not_found';
-      if (!accepted) _rollbackCancellation(id);
+      if (!accepted) _rollbackCancellation(id, entry.state);
       decision.complete(accepted);
       return accepted;
     } on Object {
-      _rollbackCancellation(id);
+      _rollbackCancellation(id, entry.state);
       decision.complete(false);
       return false;
     } finally {
@@ -266,22 +354,19 @@ class TransferController extends ChangeNotifier {
     }
   }
 
-  void clearFinished() {
+  void clearFinished({TransferKind? kind}) {
+    bool shouldRemove(TransferEntry entry) =>
+        (kind == null || entry.kind == kind) &&
+        entry.state != TransferState.running &&
+        entry.state != TransferState.paused &&
+        entry.state != TransferState.cancelling &&
+        entry.state != TransferState.queued;
+
     final removedIds = _entries
-        .where(
-          (entry) =>
-              entry.state != TransferState.running &&
-              entry.state != TransferState.cancelling &&
-              entry.state != TransferState.queued,
-        )
+        .where(shouldRemove)
         .map((entry) => entry.id)
         .toList(growable: false);
-    _entries.removeWhere(
-      (entry) =>
-          entry.state != TransferState.running &&
-          entry.state != TransferState.cancelling &&
-          entry.state != TransferState.queued,
-    );
+    _entries.removeWhere(shouldRemove);
     for (final id in removedIds) {
       _iconRetries.remove(id);
     }
@@ -445,81 +530,133 @@ class TransferController extends ChangeNotifier {
   }
 
   Future<void> _drain() async {
-    if (_draining) return;
-    _draining = true;
-    while (_queue.isNotEmpty) {
-      final job = _queue.removeFirst();
-      final index = _entries.indexWhere((entry) => entry.id == job.id);
-      if (index < 0 || _entries[index].state != TransferState.queued) {
-        continue;
-      }
-      _entries[index] = _entries[index].copyWith(state: TransferState.running);
-      _notify();
-      _activeJob = job;
-      final poller = _OperationPoller(
-        operationPollInterval,
-        () => _pollOperation(job.id, job.operationId),
-      )..start();
-      _activePoller = poller;
-      try {
-        final warning = await job.run();
-        final completedIndex = _entries.indexWhere(
-          (entry) => entry.id == job.id,
+    if (_admitting || _disposed) return;
+    _admitting = true;
+    try {
+      final capacity = await _resolveTransferCapacity();
+      while (!_disposed && _queue.isNotEmpty && _activeJobs.length < capacity) {
+        final job = _queue.removeFirst();
+        final index = _entries.indexWhere((entry) => entry.id == job.id);
+        if (index < 0 || _entries[index].state != TransferState.queued) {
+          continue;
+        }
+        _entries[index] = _entries[index].copyWith(
+          state: TransferState.running,
         );
-        if (completedIndex >= 0) {
-          final completed = _entries[completedIndex];
-          // A successful transfer response is authoritative. Cooperative
-          // cancellation can arrive after the core has committed the file;
-          // treating that late request as cancellation would hide a completed
-          // upload/download and could encourage a duplicate retry.
-          _entries[completedIndex] = completed.copyWith(
-            state: warning == null
-                ? TransferState.succeeded
-                : TransferState.succeededWithWarning,
-            stage: TransferStage.finished,
-            cancelRequested: false,
-            errorMessage: warning,
-            iconRetryAvailable:
-                warning != null && _iconRetries.containsKey(job.id),
-          );
-        }
-        if (!_disposed && completedIndex >= 0) {
-          job.onSuccess();
-        }
-      } on _DirectoryUploadCancelled catch (cancelled) {
-        _cancelled(
-          job.id,
-          message: cancelled.result.summary,
-          directoryUploadResult: cancelled.result,
-        );
-        if (!_disposed && cancelled.result.hasRemoteChanges) {
-          job.onSuccess();
-        }
-      } on CloudFailure catch (error) {
-        if (error.code == 'cancelled') {
-          _cancelled(job.id);
-        } else {
-          _fail(job.id, error.message);
-        }
-      } on Object {
-        _fail(job.id, '传输失败，请稍后重试');
-      } finally {
-        await poller.stop();
-        await _forgetOperation(job.operationId);
-        if (identical(_activePoller, poller)) _activePoller = null;
-        if (identical(_activeJob, job)) _activeJob = null;
+        final poller = _OperationPoller(
+          operationPollInterval,
+          () => _pollOperation(job.id, job.operationId),
+        )..start();
+        _activeJobs[job.id] = job;
+        _activePollers[job.id] = poller;
+        _notify();
+        unawaited(_runActiveJob(job, poller));
       }
-      _notify();
+    } finally {
+      _admitting = false;
+      final capacity = _transferCapacity;
+      if (!_disposed &&
+          capacity != null &&
+          _queue.isNotEmpty &&
+          _activeJobs.length < capacity) {
+        scheduleMicrotask(_drain);
+      }
     }
-    _draining = false;
+  }
+
+  Future<int> _resolveTransferCapacity() {
+    final cached = _transferCapacity;
+    if (cached != null) return Future<int>.value(cached);
+    final pending = _transferCapacityFuture;
+    if (pending != null) return pending;
+
+    final Future<int> future = () async {
+      final service = cloudService;
+      if (service is CloudRuntimeCapabilitiesProvider) {
+        try {
+          final provider = service as CloudRuntimeCapabilitiesProvider;
+          final capabilities = await provider.runtimeCapabilities();
+          return capabilities.transferWorkers;
+        } on Object {
+          // Fall through to the platform-reported device capacity. Both paths
+          // are device adaptive; no fixed transfer width is introduced here.
+        }
+      }
+      return Platform.numberOfProcessors > 0 ? Platform.numberOfProcessors : 1;
+    }();
+    _transferCapacityFuture = future;
+    return future.then<int>((capacity) {
+      final normalized = capacity > 0 ? capacity : 1;
+      _transferCapacity = normalized;
+      _transferCapacityFuture = null;
+      return normalized;
+    });
+  }
+
+  Future<void> _runActiveJob(_TransferJob job, _OperationPoller poller) async {
+    try {
+      final warning = await job.run();
+      final completedIndex = _entries.indexWhere((entry) => entry.id == job.id);
+      if (completedIndex >= 0) {
+        final completed = _entries[completedIndex];
+        // A successful core response is authoritative even if cancellation or
+        // pause raced with the final commit.
+        _entries[completedIndex] = completed.copyWith(
+          state: warning == null
+              ? TransferState.succeeded
+              : TransferState.succeededWithWarning,
+          stage: TransferStage.finished,
+          cancelRequested: false,
+          errorMessage: warning,
+          iconRetryAvailable:
+              warning != null && _iconRetries.containsKey(job.id),
+        );
+      }
+      if (!_disposed && completedIndex >= 0) {
+        job.onSuccess();
+      }
+    } on _DirectoryUploadCancelled catch (cancelled) {
+      _cancelled(
+        job.id,
+        message: cancelled.result.summary,
+        directoryUploadResult: cancelled.result,
+      );
+      if (!_disposed && cancelled.result.hasRemoteChanges) {
+        job.onSuccess();
+      }
+    } on CloudFailure catch (error) {
+      if (error.code == 'cancelled') {
+        _cancelled(job.id);
+      } else {
+        _fail(job.id, error.message);
+      }
+    } on Object {
+      _fail(job.id, '传输失败，请稍后重试');
+    } finally {
+      await poller.stop();
+      await _forgetOperation(job.operationId);
+      if (identical(_activePollers[job.id], poller)) {
+        _activePollers.remove(job.id);
+      }
+      if (identical(_activeJobs[job.id], job)) {
+        _activeJobs.remove(job.id);
+      }
+      _notify();
+      if (!_disposed) unawaited(_drain());
+    }
   }
 
   @override
   void dispose() {
+    final activeIds = _activeJobs.keys.toList(growable: false);
+    for (final id in activeIds) {
+      unawaited(cancel(id));
+    }
     _disposed = true;
-    final activeJob = _activeJob;
-    if (activeJob != null) unawaited(cancel(activeJob.id));
-    _activePoller?.cancel();
+    for (final poller in _activePollers.values) {
+      poller.cancel();
+    }
+    _activePollers.clear();
     _queue.clear();
     _iconRetries.clear();
     super.dispose();
@@ -590,6 +727,7 @@ class TransferController extends ChangeNotifier {
       final entry = _entries[index];
       if (status.kind != entry.kind.coreName) return;
       if (entry.state != TransferState.running &&
+          entry.state != TransferState.paused &&
           entry.state != TransferState.cancelling) {
         return;
       }
@@ -603,8 +741,15 @@ class TransferController extends ChangeNotifier {
           : entry.totalBytes;
       final coreCancelling =
           status.state == 'cancelling' || status.state == 'cancelled';
+      final corePaused = status.state == 'paused';
       _entries[index] = entry.copyWith(
-        state: coreCancelling ? TransferState.cancelling : entry.state,
+        state: coreCancelling
+            ? TransferState.cancelling
+            : corePaused
+            ? TransferState.paused
+            : status.state == 'running' && entry.state == TransferState.paused
+            ? TransferState.running
+            : entry.state,
         bytesTransferred: transferred,
         totalBytes: total,
         completedUnits: status.completedUnits,
@@ -674,6 +819,7 @@ class TransferController extends ChangeNotifier {
     if (index >= 0) {
       final entry = _entries[index];
       if (entry.state == TransferState.running ||
+          entry.state == TransferState.paused ||
           entry.state == TransferState.cancelling) {
         // A mismatched identity is not allowed to mutate another transfer's
         // progress. Cancellation replies may race a newer status poll, so
@@ -688,7 +834,11 @@ class TransferController extends ChangeNotifier {
             ? status.totalBytes
             : entry.totalBytes;
         _entries[index] = entry.copyWith(
-          state: accepted ? TransferState.cancelling : TransferState.running,
+          state: accepted
+              ? TransferState.cancelling
+              : requestedEntry.state == TransferState.paused
+              ? TransferState.paused
+              : TransferState.running,
           bytesTransferred: transferred,
           totalBytes: total,
           completedUnits: sameOperation
@@ -703,16 +853,19 @@ class TransferController extends ChangeNotifier {
     return accepted;
   }
 
-  void _rollbackCancellation(int id) {
+  void _rollbackCancellation(int id, TransferState previousState) {
     final index = _entries.indexWhere((entry) => entry.id == id);
     if (index < 0) return;
     final entry = _entries[index];
     if (entry.state != TransferState.running &&
+        entry.state != TransferState.paused &&
         entry.state != TransferState.cancelling) {
       return;
     }
     _entries[index] = entry.copyWith(
-      state: TransferState.running,
+      state: previousState == TransferState.paused
+          ? TransferState.paused
+          : TransferState.running,
       cancelRequested: false,
     );
     _notify();

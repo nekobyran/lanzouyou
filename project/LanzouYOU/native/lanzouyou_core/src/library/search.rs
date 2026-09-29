@@ -20,7 +20,7 @@ const MAX_LIBRARY_SOURCES: usize = 4_096;
 const MAX_SEARCH_FOLDERS: usize = 10_000;
 const MAX_DIRECTORY_PAGES: u32 = 100;
 const DIRECTORY_PAGE_SIZE: usize = 50;
-const MAX_GLOBAL_SEARCH_WORKERS: usize = 32;
+
 const SEARCH_NETWORK_BUDGET: Duration = Duration::from_secs(12);
 const MAX_INCREMENTAL_SEARCHES: usize = 128;
 
@@ -262,13 +262,15 @@ type GlobalSearchTask = Box<dyn FnOnce() + Send + 'static>;
 
 struct GlobalSearchExecutor {
     sender: std::sync::mpsc::Sender<GlobalSearchTask>,
+    worker_count: usize,
 }
 
 impl GlobalSearchExecutor {
     fn new() -> Self {
         let (sender, receiver) = std::sync::mpsc::channel::<GlobalSearchTask>();
         let receiver = Arc::new(Mutex::new(receiver));
-        for worker_index in 0..MAX_GLOBAL_SEARCH_WORKERS {
+        let worker_count = crate::parallelism::network_worker_capacity();
+        for worker_index in 0..worker_count {
             let receiver = receiver.clone();
             thread::Builder::new()
                 .name(format!("lanzou-search-{worker_index}"))
@@ -284,7 +286,14 @@ impl GlobalSearchExecutor {
                 })
                 .expect("the bounded Lanzou search worker can start");
         }
-        Self { sender }
+        Self {
+            sender,
+            worker_count,
+        }
+    }
+
+    fn worker_count(&self) -> usize {
+        self.worker_count
     }
 
     fn submit(&self, task: GlobalSearchTask) -> CoreResult<()> {
@@ -399,7 +408,7 @@ where
         &sender,
         &runner,
         operation,
-        MAX_GLOBAL_SEARCH_WORKERS,
+        GLOBAL_SEARCH_EXECUTOR.worker_count(),
     )?;
     let mut slots = std::iter::repeat_with(|| None)
         .take(result_count)
@@ -480,7 +489,9 @@ where
             &sender,
             &runner,
             operation,
-            MAX_GLOBAL_SEARCH_WORKERS.saturating_sub(outstanding),
+            GLOBAL_SEARCH_EXECUTOR
+                .worker_count()
+                .saturating_sub(outstanding),
         )?;
     }
     shared
@@ -997,8 +1008,8 @@ fn search_inner(
     let mut source_progress = HashMap::<String, SourcePublicationProgress>::new();
     let phase_results = run_search_phase_jobs(
         &unique_sources,
-        options.concurrency,
-        Duration::from_millis(options.source_switch_delay_ms),
+        crate::parallelism::network_workers(unique_sources.len()),
+        Duration::ZERO,
         operation.as_ref(),
         runner,
         |result, source_complete| {
@@ -1691,10 +1702,7 @@ mod tests {
 
     #[test]
     fn test_search_accepts_current_606_source_catalog_and_deduplicates_with_bounded_workers() {
-        let options = LibrarySearchOptions {
-            concurrency: 7,
-            ..LibrarySearchOptions::default()
-        };
+        let options = LibrarySearchOptions::default();
 
         let result = search(
             "tool".to_owned(),
@@ -1820,8 +1828,6 @@ mod tests {
                 password: "secret".to_owned(),
             }],
             LibrarySearchOptions {
-                concurrency: 1,
-                source_switch_delay_ms: 0,
                 until_last_page: true,
                 max_pages: 4,
             },
@@ -2333,8 +2339,9 @@ mod tests {
         for coordinator in coordinators {
             assert_eq!(coordinator.join().unwrap().len(), 64);
         }
-        assert!(peak.load(Ordering::SeqCst) <= MAX_GLOBAL_SEARCH_WORKERS);
-        assert!(worker_ids.lock().unwrap().len() <= MAX_GLOBAL_SEARCH_WORKERS);
+        let adaptive_limit = crate::parallelism::network_worker_capacity();
+        assert!(peak.load(Ordering::SeqCst) <= adaptive_limit);
+        assert!(worker_ids.lock().unwrap().len() <= adaptive_limit);
     }
 
     #[test]

@@ -9,6 +9,7 @@ mod handle_registry;
 mod html;
 mod link_router;
 mod model;
+mod network_profile;
 mod rate_limit;
 mod repackage_android;
 mod repackage_common;
@@ -48,6 +49,42 @@ use model::{
 use rate_limit::RateLimiter;
 use session::LibraryTransport;
 use url::SecurityPolicy;
+
+pub(crate) fn pause_transfer_if_present(operation_id: &str) -> CoreResult<()> {
+    match transfer::process_transfers().pause(operation_id) {
+        Ok(_) => Ok(()),
+        Err(error) if error.code == "transfer_not_found" => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+pub(crate) fn resume_transfer_if_present(operation_id: &str) -> CoreResult<()> {
+    match transfer::process_transfers().resume(operation_id) {
+        Ok(_) => Ok(()),
+        Err(error) if error.code == "transfer_not_found" => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+pub(crate) fn cancel_transfer_if_present(operation_id: &str) -> CoreResult<()> {
+    match transfer::process_transfers().cancel(operation_id) {
+        Ok(_) => Ok(()),
+        Err(error) if error.code == "transfer_not_found" => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+pub(crate) fn import_verification_cookie(url: &str, cookie: &str) -> CoreResult<usize> {
+    session::import_user_verification_cookie(url, cookie)
+}
+
+pub(crate) fn forget_transfer_if_present(operation_id: &str) -> CoreResult<()> {
+    match transfer::process_transfers().forget(operation_id) {
+        Ok(()) => Ok(()),
+        Err(error) if error.code == "transfer_not_found" => Ok(()),
+        Err(error) => Err(error),
+    }
+}
 
 pub(crate) struct LibraryService {
     policy: SecurityPolicy,
@@ -932,6 +969,9 @@ impl LibraryService {
                 share_url,
                 password,
             } => to_value(self.describe(source_id, share_url, password)?),
+            Command::LibraryReadDocument { share_url } => {
+                to_value(document::fetch_text(&share_url)?)
+            }
             Command::LibraryFetchAsset { url } => to_value(asset::fetch_asset(&url)?),
             Command::LibraryRepackageAndroid { request } => {
                 to_value(repackage_android::repackage_android(request)?)

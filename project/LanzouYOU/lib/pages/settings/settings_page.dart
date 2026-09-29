@@ -3,10 +3,13 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:file_picker/file_picker.dart' as file_picker;
 import 'package:lanzou_library_shell/library_preview.dart';
+import 'package:url_launcher/url_launcher.dart';
 
+import '../../app/app_version.dart';
 import '../../controllers/app_controller.dart';
 import '../../pages/public_library/public_library_core.dart';
 import '../../services/app_settings_store.dart';
+import '../../services/cloud_service.dart';
 import '../../shared/app_motion.dart';
 import 'account_settings_page.dart';
 import 'lanzou_settings_page.dart';
@@ -60,6 +63,8 @@ class SettingsPage extends StatelessWidget {
                             ? () => _openLanzouSettings(context)
                             : null,
                       ),
+                      const Divider(height: 1),
+                      _UpdateCheckTile(cloudService: controller.cloudService),
                     ],
                   ),
                 ),
@@ -136,6 +141,119 @@ class SettingsPage extends StatelessWidget {
             ),
       ),
     );
+  }
+}
+
+class _UpdateCheckTile extends StatefulWidget {
+  const _UpdateCheckTile({required this.cloudService});
+
+  final CloudService cloudService;
+
+  @override
+  State<_UpdateCheckTile> createState() => _UpdateCheckTileState();
+}
+
+class _UpdateCheckTileState extends State<_UpdateCheckTile> {
+  bool _checking = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final provider = widget.cloudService is CloudAppUpdateProvider;
+    return ListTile(
+      key: const Key('app-update-entry'),
+      enabled: provider && !_checking,
+      leading: _checking
+          ? const SizedBox.square(
+              dimension: 24,
+              child: CircularProgressIndicator(strokeWidth: 2),
+            )
+          : const Icon(Icons.system_update_alt_rounded),
+      title: const Text('关于与更新'),
+      subtitle: Text(
+        provider ? 'LanzouYOU $lanzouYouVersion · 检查正式版本更新' : '当前核心未提供更新检查',
+      ),
+      trailing: provider && !_checking
+          ? const Icon(Icons.refresh_rounded)
+          : null,
+      onTap: provider && !_checking ? _check : null,
+    );
+  }
+
+  Future<void> _check() async {
+    final service = widget.cloudService;
+    if (service is! CloudAppUpdateProvider) return;
+    final provider = service as CloudAppUpdateProvider;
+    setState(() => _checking = true);
+    try {
+      final locale = Localizations.localeOf(context);
+      final country = locale.countryCode?.toUpperCase();
+      final preferMirror =
+          locale.languageCode.toLowerCase() == 'zh' ||
+          const {'CN', 'HK', 'MO', 'TW', 'SG'}.contains(country);
+      final info = await provider.appUpdateCheck(
+        lanzouYouVersion,
+        preferMirror: preferMirror,
+      );
+      if (!mounted) return;
+      if (info == null) {
+        _showMessage('当前已是最新正式版本');
+        return;
+      }
+      await _showUpdate(info);
+    } on CloudFailure catch (error) {
+      if (mounted) _showMessage(error.message);
+    } on Object {
+      if (mounted) _showMessage('检查更新失败，请稍后重试');
+    } finally {
+      if (mounted) setState(() => _checking = false);
+    }
+  }
+
+  Future<void> _showUpdate(AppUpdateInfo info) async {
+    final download = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        icon: const Icon(Icons.system_update_alt_rounded),
+        title: Text('发现 LanzouYOU ${info.version}'),
+        content: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 520),
+          child: SingleChildScrollView(
+            child: SelectableText(
+              info.body.trim().isEmpty ? '新的正式版本已发布。' : info.body.trim(),
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('稍后'),
+          ),
+          FilledButton.icon(
+            key: const Key('download-app-update'),
+            onPressed: () => Navigator.pop(context, true),
+            icon: const Icon(Icons.download_rounded),
+            label: const Text('下载更新'),
+          ),
+        ],
+      ),
+    );
+    if (download != true || !mounted) return;
+    for (final value in info.downloadUrls) {
+      final uri = Uri.tryParse(value);
+      if (uri == null) continue;
+      try {
+        if (await launchUrl(uri, mode: LaunchMode.externalApplication)) return;
+      } on Object {
+        // Try the next Rust-validated release URL.
+      }
+    }
+    if (mounted) _showMessage('无法打开更新下载地址');
+  }
+
+  void _showMessage(String message) {
+    ScaffoldMessenger.of(context)
+      ..hideCurrentSnackBar()
+      ..showSnackBar(SnackBar(content: Text(message)));
   }
 }
 

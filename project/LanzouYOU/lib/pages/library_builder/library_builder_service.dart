@@ -4,7 +4,7 @@ import 'dart:isolate';
 import 'dart:math';
 
 import 'package:archive/archive.dart';
-import 'package:crypto/crypto.dart';
+
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
@@ -16,7 +16,7 @@ class LibraryBuildArtifact {
   const LibraryBuildArtifact({
     required this.platform,
     required this.path,
-    required this.sha256,
+    required this.byteLength,
     this.fileName = '',
     this.bundleEntry,
     this.metadata = const {},
@@ -24,7 +24,7 @@ class LibraryBuildArtifact {
 
   final String platform;
   final String path;
-  final String sha256;
+  final int byteLength;
   final String fileName;
   final String? bundleEntry;
   final Map<String, Object?> metadata;
@@ -212,25 +212,20 @@ class AssetLibraryTemplateLoader implements LibraryTemplateLoader {
         final expectedFile = index == 0
             ? androidAsset.split('/').last
             : windowsAsset.split('/').last;
-        final artifact = _exactMap(artifacts[index], const {
+                final artifact = _exactMap(artifacts[index], const {
           'target',
           'file',
           'bytes',
-          'sha256',
         });
         final byteLength = artifact['bytes'];
-        final expectedDigest = artifact['sha256'];
         if (artifact['target'] != targetName ||
             artifact['file'] != expectedFile ||
             byteLength is! int ||
-            byteLength <= 0 ||
-            expectedDigest is! String ||
-            !RegExp(r'^[0-9a-f]{64}$').hasMatch(expectedDigest)) {
+            byteLength <= 0) {
           throw const FormatException();
         }
         final bytes = await _loadBytes('assets/templates/$expectedFile');
-        if (bytes.length != byteLength ||
-            !_digestBytesEqual(sha256.convert(bytes), expectedDigest)) {
+        if (bytes.length != byteLength) {
           throw const FormatException();
         }
         templates[target] = Uint8List.fromList(bytes);
@@ -288,7 +283,6 @@ class LibraryArtifactExportItem {
     required this.fileName,
     required this.extension,
     required this.byteLength,
-    required this.sha256,
     required this.metadata,
   });
 
@@ -297,12 +291,11 @@ class LibraryArtifactExportItem {
   final String fileName;
   final String extension;
   final int byteLength;
-  final String sha256;
   final Map<String, Object?> metadata;
 
   Map<String, Object?> safeManifestJson() {
-    const safeIdentityKeys = {
-      'certificateSha256',
+        const safeIdentityKeys = {
+      'signingVerified',
       'packageName',
       'versionName',
       'versionCode',
@@ -311,8 +304,7 @@ class LibraryArtifactExportItem {
     return <String, Object?>{
       'platform': platform,
       'fileName': fileName,
-      'bytes': byteLength,
-      'sha256': sha256,
+            'bytes': byteLength,
       'identity': <String, Object?>{
         for (final entry in metadata.entries)
           if (safeIdentityKeys.contains(entry.key)) entry.key: entry.value,
@@ -456,8 +448,7 @@ class FilePickerLibraryArtifactExporter implements LibraryArtifactExporter {
     cancellation?.throwIfCancelled();
     final bytes = await File(item.sourcePath).readAsBytes();
     cancellation?.throwIfCancelled();
-    if (bytes.length != item.byteLength ||
-        !_digestBytesEqual(sha256.convert(bytes), item.sha256)) {
+        if (bytes.length != item.byteLength) {
       throw StateError('待导出产物已发生变化');
     }
     return bytes;
@@ -510,10 +501,9 @@ class FilePickerLibraryArtifactExporter implements LibraryArtifactExporter {
       '${target.path}.lanzouyou-${DateTime.now().microsecondsSinceEpoch}-$nonce.tmp',
     );
     try {
-      await temporary.writeAsBytes(bytes, flush: true);
+            await temporary.writeAsBytes(bytes, flush: true);
       if (await temporary.length() != bytes.length ||
-          (await sha256.bind(temporary.openRead()).first).toString() !=
-              sha256.convert(bytes).toString()) {
+          !_bytesEqual(await temporary.readAsBytes(), bytes)) {
         throw StateError('导出暂存产物校验失败');
       }
       await temporary.rename(target.path);
@@ -604,8 +594,8 @@ class LocalTemplateLibraryBuildService implements LibraryBuildService {
             platform: artifact.target.name,
             path: commit.artifactPaths[artifact.target.name] ?? commit.path,
             fileName: artifact.fileName,
-            bundleEntry: commit.isBundle ? artifact.fileName : null,
-            sha256: artifact.sha256,
+                        bundleEntry: commit.isBundle ? artifact.fileName : null,
+            byteLength: artifact.byteLength,
             metadata: artifact.metadata,
           ),
       ];
@@ -672,10 +662,9 @@ class LocalTemplateLibraryBuildService implements LibraryBuildService {
     final byteLength = await output.length();
     if (byteLength == 0) throw StateError('核心返回了空产物');
 
-    final rustSha256 = '${response['sha256'] ?? ''}';
-    final actualSha256 = await sha256.bind(output.openRead()).first;
-    if (!_digestBytesEqual(actualSha256, rustSha256)) {
-      throw StateError('产物摘要校验失败');
+        final rustBytes = (response['bytes'] as num?)?.toInt();
+    if (rustBytes == null || rustBytes != byteLength) {
+      throw StateError('产物大小校验失败');
     }
     final metadata = isAndroid
         ? _validateAndroidResponse(recipe, response)
@@ -685,8 +674,7 @@ class LocalTemplateLibraryBuildService implements LibraryBuildService {
       sourcePath: output.path,
       fileName: fileName,
       extension: extension,
-      byteLength: byteLength,
-      sha256: actualSha256.toString(),
+            byteLength: byteLength,
       metadata: metadata,
     );
   }
@@ -695,18 +683,18 @@ class LocalTemplateLibraryBuildService implements LibraryBuildService {
     LibraryBuildRecipe recipe,
     Map<String, Object?> response,
   ) {
-    final certificateSha256 = '${response['certificateSha256'] ?? ''}';
+        final signingVerified = response['signingVerified'] == true;
     final packageName = '${response['packageName'] ?? ''}';
     final versionName = '${response['versionName'] ?? ''}';
     final versionCode = (response['versionCode'] as num?)?.toInt();
-    if (!_isSha256(certificateSha256) ||
+    if (!signingVerified ||
         packageName != recipe.identity.applicationId ||
         versionName != recipe.identity.versionName ||
         versionCode != recipe.identity.versionCode) {
       throw StateError('Android 产物身份校验失败');
     }
     return {
-      'certificateSha256': certificateSha256,
+      'signingVerified': true,
       'packageName': packageName,
       'versionName': versionName,
       'versionCode': versionCode,
@@ -733,7 +721,6 @@ class _PreparedLibraryBuildArtifact {
     required this.fileName,
     required this.extension,
     required this.byteLength,
-    required this.sha256,
     required this.metadata,
   });
 
@@ -742,7 +729,6 @@ class _PreparedLibraryBuildArtifact {
   final String fileName;
   final String extension;
   final int byteLength;
-  final String sha256;
   final Map<String, Object?> metadata;
 
   LibraryArtifactExportItem get exportItem => LibraryArtifactExportItem(
@@ -750,8 +736,7 @@ class _PreparedLibraryBuildArtifact {
     sourcePath: sourcePath,
     fileName: fileName,
     extension: extension,
-    byteLength: byteLength,
-    sha256: sha256,
+        byteLength: byteLength,
     metadata: metadata,
   );
 }
@@ -874,17 +859,10 @@ String _join(String first, String second, [String? third, String? fourth]) {
   return result;
 }
 
-bool _isSha256(String value) => RegExp(r'^[0-9a-fA-F]{64}$').hasMatch(value);
-
-bool _digestBytesEqual(Digest actual, String expectedHex) {
-  if (!_isSha256(expectedHex)) return false;
-  final actualBytes = actual.bytes;
-  for (var index = 0; index < actualBytes.length; index++) {
-    final expectedByte = int.parse(
-      expectedHex.substring(index * 2, index * 2 + 2),
-      radix: 16,
-    );
-    if (actualBytes[index] != expectedByte) return false;
+bool _bytesEqual(List<int> first, List<int> second) {
+  if (first.length != second.length) return false;
+  for (var index = 0; index < first.length; index++) {
+    if (first[index] != second[index]) return false;
   }
   return true;
 }

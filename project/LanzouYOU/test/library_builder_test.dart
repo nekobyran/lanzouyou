@@ -3,7 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:archive/archive.dart';
-import 'package:crypto/crypto.dart';
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -252,13 +252,12 @@ void main() {
   });
 
   test(
-    'asset template loader rejects an artifact digest mismatch safely',
+        'asset template loader rejects an artifact byte-length mismatch safely',
     () async {
       final assets = _validTemplateAssets();
-      assets[AssetLibraryTemplateLoader.windowsAsset] = Uint8List.fromList([
+            assets[AssetLibraryTemplateLoader.windowsAsset] = Uint8List.fromList([
         4,
         5,
-        7,
       ]);
 
       await _expectSafeTemplateFailure(assets);
@@ -817,7 +816,7 @@ void main() {
             return 'memory://$fileName';
           },
     );
-    final digest = sha256.convert(const [1, 2, 3]).toString();
+    
 
     final result = await exporter.exportBatch(
       LibraryArtifactExportBatch(
@@ -829,8 +828,7 @@ void main() {
             sourcePath: source.path,
             fileName: 'custom_library-1.0.0.apk',
             extension: 'apk',
-            byteLength: 3,
-            sha256: digest,
+                        byteLength: 3,
             metadata: const {},
           ),
         ],
@@ -869,8 +867,7 @@ void main() {
             sourcePath: source.path,
             fileName: 'custom_library-1.0.0.apk',
             extension: 'apk',
-            byteLength: 3,
-            sha256: sha256.convert(const [4, 5, 6]).toString(),
+                        byteLength: 3,
             metadata: const {},
           ),
         ],
@@ -891,16 +888,16 @@ void main() {
     expect(temporaryFiles, isEmpty);
   });
 
-  test('digest mismatch leaves exporter untouched', () async {
+    test('core byte-count mismatch leaves exporter untouched', () async {
     final root = await Directory.systemTemp.createTemp(
-      'library-builder-digest-test-',
+            'library-builder-byte-count-test-',
     );
     addTearDown(() async {
       if (await root.exists()) await root.delete(recursive: true);
     });
     final exporter = _FakeArtifactExporter();
     final service = LocalTemplateLibraryBuildService(
-      dispatcher: _FakeCoreDispatcher(corruptDigest: true),
+            dispatcher: _FakeCoreDispatcher(corruptByteLength: true),
       templateLoader: const _FakeTemplateLoader(),
       artifactExporter: exporter,
       cacheDirectoryProvider: () async =>
@@ -991,7 +988,8 @@ void main() {
       final fileName = artifact['fileName']! as String;
       final bytes = bundle.findFile(fileName)!.readBytes()!;
       expect(artifact['bytes'], bytes.length);
-      expect(artifact['sha256'], sha256.convert(bytes).toString());
+                  expect(artifact.keys, containsAll(<String>['platform', 'fileName', 'bytes', 'identity']));
+
     }
   });
 }
@@ -1047,17 +1045,15 @@ class _FakeBuildService implements LibraryBuildService {
           platform: 'android',
           path: 'bundle://sample/android.apk',
           fileName: 'sample.apk',
-          bundleEntry: 'sample.apk',
-          sha256:
-              'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                    bundleEntry: 'sample.apk',
+          byteLength: 3,
         ),
         LibraryBuildArtifact(
           platform: 'windows',
           path: 'bundle://sample/windows.zip',
           fileName: 'sample.zip',
-          bundleEntry: 'sample.zip',
-          sha256:
-              'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                    bundleEntry: 'sample.zip',
+          byteLength: 3,
         ),
       ],
       export: LibraryBuildExport(
@@ -1080,13 +1076,13 @@ class _FakeProjectStore implements LibraryProjectStore {
 class _FakeCoreDispatcher implements LibraryCoreDispatcher {
   _FakeCoreDispatcher({
     this.failOnRequest,
-    this.corruptDigest = false,
+        this.corruptByteLength = false,
     this.firstRequestStarted,
     this.finishFirstRequest,
   });
 
   final int? failOnRequest;
-  final bool corruptDigest;
+    final bool corruptByteLength;
   final Completer<void>? firstRequestStarted;
   final Completer<void>? finishFirstRequest;
   final requests = <Map<String, Object?>>[];
@@ -1106,14 +1102,12 @@ class _FakeCoreDispatcher implements LibraryCoreDispatcher {
         ? const [1, 2, 3]
         : const [4, 5, 6];
     await output.writeAsBytes(bytes, flush: true);
-    final hash = corruptDigest
-        ? 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
-        : sha256.convert(bytes).toString();
+        final reportedBytes = corruptByteLength ? bytes.length + 1 : bytes.length;
     if (request['op'] == 'library_repackage_android') {
       return {
         'apkPath': output.path,
-        'sha256': hash,
-        'certificateSha256': hash,
+        'bytes': reportedBytes,
+        'signingVerified': true,
         'packageName': 'cc.nkbr.customlibrary',
         'versionName': '1.0.0',
         'versionCode': 1,
@@ -1121,7 +1115,7 @@ class _FakeCoreDispatcher implements LibraryCoreDispatcher {
     }
     return {
       'archivePath': output.path,
-      'sha256': hash,
+      'bytes': reportedBytes,
       'exeName': 'custom-library.exe',
     };
   }
@@ -1222,14 +1216,12 @@ Map<String, Object?> _validTemplateManifest() => {
     {
       'target': 'android',
       'file': 'lanzou_library_shell_android.apk',
-      'bytes': 3,
-      'sha256': sha256.convert([1, 2, 3]).toString(),
+            'bytes': 3,
     },
     {
       'target': 'windows',
       'file': 'lanzou_library_shell_windows.zip',
-      'bytes': 3,
-      'sha256': sha256.convert([4, 5, 6]).toString(),
+            'bytes': 3,
     },
   ],
 };

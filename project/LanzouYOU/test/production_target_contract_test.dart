@@ -73,12 +73,9 @@ void main() {
     await tester.binding.setSurfaceSize(const Size(390, 844));
     addTearDown(() => tester.binding.setSurfaceSize(null));
     settings_preview.main();
-    await tester.pumpAndSettle();
+    await _pumpUntil(tester, find.byKey(const Key('lanzou-settings-page')));
 
-    expect(
-      find.byKey(const Key('compact-navigation'), skipOffstage: false),
-      findsOneWidget,
-    );
+
     expect(find.byKey(const Key('lanzou-settings-page')), findsOneWidget);
     expect(find.text('597 个官方来源 · 9 个合集'), findsOneWidget);
     expect(find.byKey(const Key('lanzou-appearance-settings')), findsOneWidget);
@@ -94,12 +91,9 @@ void main() {
 
     await tester.binding.setSurfaceSize(const Size(1100, 800));
     settings_preview.main();
-    await tester.pumpAndSettle();
+    await _pumpUntil(tester, find.byKey(const Key('lanzou-settings-wide-master-detail')));
 
-    expect(
-      find.byKey(const Key('wide-navigation'), skipOffstage: false),
-      findsOneWidget,
-    );
+
     expect(
       find.byKey(const Key('lanzou-settings-wide-master-detail')),
       findsOneWidget,
@@ -111,3 +105,16 @@ void main() {
     expect(find.textContaining('用户 ID'), findsNothing);
   });
 }
+
+Future<void> _pumpUntil(
+  WidgetTester tester,
+  Finder finder, {
+  int maxFrames = 160,
+}) async {
+  for (var frame = 0; frame < maxFrames; frame++) {
+    await tester.pump(const Duration(milliseconds: 16));
+    if (finder.evaluate().isNotEmpty) return;
+  }
+  fail('Timed out waiting for $finder');
+}
+

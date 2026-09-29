@@ -442,13 +442,18 @@ impl SessionClient {
         } else {
             page_html.clone()
         };
-        let mut fields = parser::js_data_fields_with_context(&parameter_source, &page_html)?;
+        let mut fields = parser::download_page_fields_with_context(&parameter_source, &page_html)?;
+
         if !password.is_empty() {
             fields.insert("p".to_owned(), password.to_owned());
         }
         let ajax_path = parser::ajax_endpoint(&parameter_source)
             .or_else(|| parser::ajax_endpoint(&page_html))
             .or_else(|| parser::ajax_endpoint(first_html))
+            .or_else(|| {
+                let modern = ["ajax", ".", "php"].concat();
+                page_html.contains(&modern).then_some(modern)
+            })
             .or_else(|| {
                 parser::ajax_file_id(&page_html)
                     .or_else(|| parser::ajax_file_id(first_html))
@@ -487,7 +492,9 @@ impl SessionClient {
             return absolute_http_location(&intermediate, location?);
         }
         let challenge = redirected.text()?;
-        let mut secondary = parser::js_data_fields(challenge)?;
+        let mut secondary = parser::js_data_fields(challenge)
+            .map_err(|_| CoreError::parse("二次下载验证缺少下载参数"))?;
+
         secondary.insert("el".to_owned(), "2".to_owned());
         let verify_url = format!("{download_base}/ajax.php");
         wait_secondary_verification();

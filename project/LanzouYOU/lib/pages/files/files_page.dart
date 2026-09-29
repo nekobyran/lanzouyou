@@ -11,8 +11,10 @@ import '../../models/cloud_item.dart';
 import '../../models/transfer_entry.dart';
 import '../../services/cloud_service.dart';
 import '../../services/icon_source_locator.dart';
+import '../../shared/account_menu_button.dart';
 import '../../shared/app_motion.dart';
 import '../library_builder/library_builder_page.dart';
+import '../login/login_page.dart';
 import 'folder_upload/folder_upload_launcher.dart';
 import 'folder_upload/upload_options_dialog.dart';
 
@@ -69,6 +71,35 @@ class _FilesPageState extends State<FilesPage> {
     return ListenableBuilder(
       listenable: Listenable.merge([app, widget.transferController]),
       builder: (context, _) {
+        if (!app.isSignedIn) {
+          final authenticating =
+              app.sessionStatus == SessionStatus.authenticating;
+          return Scaffold(
+            appBar: AppBar(
+              title: const Text('文件'),
+              actions: [AccountMenuButton(controller: app)],
+            ),
+            body: _StateMessage(
+              key: const ValueKey('files-login-required'),
+              icon: authenticating
+                  ? Icons.cloud_sync_outlined
+                  : Icons.lock_outline_rounded,
+              title: authenticating ? '正在登录账号' : '登录后查看私人文件',
+              message: authenticating
+                  ? '正在恢复所选账号的蓝奏云文件列表。'
+                  : '搜索、公共列表、下载记录和软件库浏览仍可免登录使用。',
+              loading: authenticating,
+              actionLabel: authenticating ? null : '登录账号',
+              onAction: authenticating
+                  ? null
+                  : () => Navigator.of(context).push<void>(
+                      MaterialPageRoute<void>(
+                        builder: (context) => LoginPage(controller: app),
+                      ),
+                    ),
+            ),
+          );
+        }
         return CallbackShortcuts(
           bindings: {
             const SingleActivator(LogicalKeyboardKey.keyR, control: true): () =>
@@ -205,6 +236,7 @@ class _FilesPageState extends State<FilesPage> {
                 onPressed: app.fileOperationRunning ? null : _createFolder,
                 icon: const Icon(Icons.create_new_folder_outlined),
               ),
+              AccountMenuButton(controller: app),
             ],
           );
     return PreferredSize(

@@ -19,7 +19,6 @@ use reqwest::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use sha2::{Digest, Sha256};
 
 use crate::error::{CoreError, CoreResult};
 
@@ -438,7 +437,6 @@ pub(crate) struct ExportResult {
     pub(crate) generation: u64,
     pub(crate) count: usize,
     pub(crate) bytes_written: usize,
-    pub(crate) sha256: String,
 }
 
 #[derive(Clone, Serialize)]
@@ -569,7 +567,7 @@ impl SourceRegistry {
                 .then_with(|| left.title.cmp(&right.title))
                 .then_with(|| left.id.cmp(&right.id))
         });
-        let signature = page_signature(
+        let scope = page_scope(
             self.overlay.generation,
             &request.category_id,
             &query,
@@ -581,7 +579,7 @@ impl SourceRegistry {
         let offset = if request.cursor.is_empty() {
             0
         } else {
-            decode_cursor(&request.cursor, signature)?
+            decode_cursor(&request.cursor, &scope)?
         };
         if offset > sources.len() {
             return Err(CoreError::invalid("SourceRegistry cursor 已失效"));
@@ -591,7 +589,7 @@ impl SourceRegistry {
             generation: self.overlay.generation,
             total: sources.len(),
             next_cursor: if end < sources.len() {
-                encode_cursor(end, signature)
+                encode_cursor(end, &scope)
             } else {
                 String::new()
             },
@@ -1209,7 +1207,6 @@ impl SourceRegistry {
             generation: self.overlay.generation,
             count,
             bytes_written: bytes.len(),
-            sha256: sha256_upper(&bytes),
         })
     }
 
@@ -2137,7 +2134,10 @@ fn source_content_key(source: &StoredSource) -> String {
         .map(|member| format!("{}\n{}", member.url, member.password))
         .collect::<Vec<_>>();
     members.sort();
-    format!("composite:{}", sha256_upper(members.join("\n").as_bytes()))
+    format!(
+        "composite:{}",
+        URL_SAFE_NO_PAD.encode(members.join("\n").as_bytes())
+    )
 }
 
 fn random_local_id() -> String {
@@ -2152,7 +2152,7 @@ fn random_preview_id() -> String {
     format!("preview:{}", URL_SAFE_NO_PAD.encode(bytes))
 }
 
-fn page_signature(
+fn page_scope(
     generation: u64,
     category: &str,
     query: &str,
@@ -2160,28 +2160,24 @@ fn page_signature(
     searchable: Option<bool>,
     child_directory: Option<bool>,
     built_in: Option<bool>,
-) -> [u8; 8] {
-    let digest = Sha256::digest(
-        format!(
-            "{generation}\0{category}\0{query}\0{kind}\0{searchable:?}\0{child_directory:?}\0{built_in:?}"
-        )
-        .as_bytes(),
-    );
-    digest[..8].try_into().expect("fixed digest prefix")
+) -> String {
+    format!(
+        "{generation}\0{category}\0{query}\0{kind}\0{searchable:?}\0{child_directory:?}\0{built_in:?}"
+    )
 }
 
-fn encode_cursor(offset: usize, signature: [u8; 8]) -> String {
-    let mut bytes = Vec::with_capacity(16);
+fn encode_cursor(offset: usize, scope: &str) -> String {
+    let mut bytes = Vec::with_capacity(8 + scope.len());
     bytes.extend_from_slice(&(offset as u64).to_be_bytes());
-    bytes.extend_from_slice(&signature);
+    bytes.extend_from_slice(scope.as_bytes());
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
-fn decode_cursor(value: &str, signature: [u8; 8]) -> CoreResult<usize> {
+fn decode_cursor(value: &str, scope: &str) -> CoreResult<usize> {
     let bytes = URL_SAFE_NO_PAD
         .decode(value)
         .map_err(|_| CoreError::invalid("SourceRegistry cursor 无效"))?;
-    if bytes.len() != 16 || bytes[8..] != signature {
+    if bytes.len() < 8 || bytes[8..] != *scope.as_bytes() {
         return Err(CoreError::invalid("SourceRegistry cursor 已失效"));
     }
     usize::try_from(u64::from_be_bytes(
@@ -2348,13 +2344,6 @@ fn sync_directory(path: &Path) -> CoreResult<()> {
     File::open(path)
         .and_then(|directory| directory.sync_all())
         .map_err(CoreError::io)
-}
-
-fn sha256_upper(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02X}"))
-        .collect()
 }
 
 #[cfg(test)]
@@ -2813,7 +2802,7 @@ mod tests {
             .unwrap();
         assert_eq!(exported.count, 1);
         assert_eq!(exported.generation, 1);
-        assert!(exported.sha256.len() == 64);
+
         let rules = fs::read_to_string(&export_path).unwrap();
         assert!(rules.contains("\"version\": 2"));
         assert!(rules.contains("secret-code"));

@@ -32,7 +32,8 @@ zip = { version = "4.6", default-features = false, features = ["deflate"] }
 windows-sys = { version = "0.61.2", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
-    "Win32_Storage_FileSystem",
+        "Win32_Storage_FileSystem",
+    "Win32_System_SystemInformation",
     "Win32_UI_Shell",
     "Win32_UI_WindowsAndMessaging",
 ] }

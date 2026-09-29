@@ -37,6 +37,17 @@ MAX_RESPONSE_BYTES = 16 * 1024 * 1024
 MAX_VERSION_LENGTH = 64
 VERIFICATION_ATTEMPTS = 12
 VERIFICATION_INTERVAL_SECONDS = 1.0
+OBSERVED_TRANSIENT_CORE_ERRORS = frozenset(
+    {
+        "core_parse_error",
+        "core_timeout",
+                "core_network_error",
+        "core_remote_error",
+        "core_ambiguous_result",
+        "core_bootstrap_data_missing",
+
+    }
+)
 ABSENCE_CONFIRMATIONS = 2
 
 VERSION_BODY = (
@@ -46,11 +57,11 @@ VERSION_BODY = (
 )
 VERSION_RE = re.compile(rf"\A{VERSION_BODY}\Z", re.ASCII)
 LIBRARY_APK_RE = re.compile(
-    rf"\A(?:LanzouMax|LanzhouMax){VERSION_BODY}\.apk\Z",
+    rf"\A(?:LanzouMax|LanzhouMax)-?{VERSION_BODY}\.apk\Z",
     re.IGNORECASE | re.ASCII,
 )
 VERSIONED_APK_RE = re.compile(
-    rf"\A(?:LanzouMax|LanzhouMax)(?P<version>{VERSION_BODY})\.apk\Z",
+    rf"\A(?:LanzouMax|LanzhouMax)-?(?P<version>{VERSION_BODY})\.apk\Z",
     re.IGNORECASE | re.ASCII,
 )
 TOKEN_RE = re.compile(r"\A[0-9a-f]{12,32}\Z", re.ASCII)
@@ -153,6 +164,8 @@ class RustCore:
                     ("下载重定向", "download_redirect_parse_error"),
                     ("下载接口", "download_api_parse_error"),
                     ("下载页", "download_page_parse_error"),
+                    ("登录页面缺少 vei", "bootstrap_vei_missing"),
+                    ("页面缺少下载参数", "bootstrap_data_missing"),
                     ("分享", "share_parse_error"),
                 ):
                     if marker in raw_message:
@@ -344,7 +357,9 @@ class Publisher:
     def restore_session(self, cookie: str) -> None:
         if not cookie:
             raise PublishError("credentials_missing")
-        self.core.call({"op": "restore_session", "cookie": cookie})
+        self._retry_observed_transient_core(
+            lambda: self.core.call({"op": "restore_session", "cookie": cookie})
+        )
 
 
     def execute(self, *, dry_run: bool = False) -> PublishSummary:
@@ -473,19 +488,44 @@ class Publisher:
         if start != b"\xff\xd8\xff" or end != b"\xff\xd9":
             raise PublishError("icon_invalid")
 
+    def _retry_observed_transient_core(
+        self,
+        operation: Callable[[], Any],
+        *,
+        cleanup_path: Path | None = None,
+    ) -> Any:
+        for attempt in range(VERIFICATION_ATTEMPTS):
+            try:
+                return operation()
+            except PublishError as error:
+                if (
+                    error.code not in OBSERVED_TRANSIENT_CORE_ERRORS
+                    or attempt + 1 >= VERIFICATION_ATTEMPTS
+                ):
+                    raise
+                if cleanup_path is not None and cleanup_path.exists():
+                    try:
+                        cleanup_path.unlink()
+                    except OSError:
+                        raise PublishError("readback_cleanup_failed") from None
+                time.sleep(VERIFICATION_INTERVAL_SECONDS)
+        raise PublishError("readback_retry_exhausted")
+
     def verify_readback(self, temp_root: Path) -> ReadbackSummary:
         """Download and byte-verify the unique final APK in both fixed targets."""
 
         self._validate_inputs()
         resolved_root = validate_readback_temp_root(temp_root)
 
-        plans = self._preflight("readback-verification-only")
+        plans = self._retry_observed_transient_core(
+            lambda: self._preflight("readback-verification-only")
+        )
         selected: list[CloudItem] = []
         for plan in plans:
             if plan.stale_staging:
                 raise PublishError("readback_staging_present")
-            candidates = plan.old_items
-            if len(candidates) != 1 or candidates[0].name != self.final_name:
+            candidates = [item for item in plan.old_items if item.name == self.final_name]
+            if len(candidates) != 1:
                 raise PublishError("readback_final_not_unique")
             selected.append(candidates[0])
         if len(selected) != len(TARGET_FOLDERS):
@@ -503,13 +543,16 @@ class Publisher:
                 temporary_root = Path(temporary)
                 for index, item in enumerate(selected):
                     destination = temporary_root / f"target-{index}.apk"
-                    result = self.core.call(
-                        {
-                            "op": "download",
-                            "id": item.id,
-                            "name": self.final_name,
-                            "destination": os.fspath(destination),
-                        }
+                    result = self._retry_observed_transient_core(
+                        lambda: self.core.call(
+                            {
+                                "op": "download",
+                                "id": item.id,
+                                "name": self.final_name,
+                                "destination": os.fspath(destination),
+                            }
+                        ),
+                        cleanup_path=destination,
                     )
                     reported_path = result.get("path")
                     bytes_written = result.get("bytesWritten")

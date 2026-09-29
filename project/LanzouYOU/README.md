@@ -48,7 +48,7 @@ Flutter UI / controllers
 | 普通上传、公开下载、回收站单项操作 | 已实现，生产 FFI 管理冒烟通过 | 上传与下载可携带 `operationId`，在传输页显示实时字节进度并可在运行中协作取消；下载使用 `.part` 临时文件并在取消或失败时清理。临时文件已完成上传、公开下载、复制、恢复与永久删除；任意扩展名兼容包、目录递归复制和全局清空回收站仍以本地测试为主 |
 | 本地图标查找、提取与压缩 | 已实现，本地测试 | sidecar、直接图片、APK launcher 与 Windows EXE 可输出最大 144×144、严格小于 100,000 字节的 PNG；Android 不提取 EXE |
 | Woozooo 文件自定义图标绑定 | 已实现；协议生产写入与 FFI 管理冒烟通过 | `prepare_icon/set_icon` 已贯通；管理冒烟以固定本地图标完成绑定与回读，另一次授权批量操作也验证了 `task 41 → 签名 OSS → task 38(type=2) → task 41` |
-| Rust 公开软件库解析与下载 | 已实现 | `library_probe/browse/search/collect/resolve/download/describe/fetch_asset` 覆盖探测、分页浏览、跨源搜索、结果补全、直链解析、真实本地下载、文件简介懒加载和安全图标转码；公共网络共享进程级长寿命 Tokio runtime（2 个 async、最多 8 个 blocking worker），transport 只持 handle，取消不会在析构阶段等待仍执行的系统 DNS；`library_search` 与 `library_download` 可携带 `operationId` 并协作取消。公共会话与管理 Cookie 隔离，`library_fetch_asset` 只访问受信图标源并固定返回严格 `{"mediaType":"image/png","bytesBase64":"..."}`，输出和远端错误不泄露访问码或 Cookie |
+| Rust 公开软件库解析与下载 | 已实现 | `library_probe/browse/search/collect/resolve/download/describe/fetch_asset` 覆盖探测、分页浏览、跨源搜索、结果补全、直链解析、真实本地下载、文件简介懒加载和安全图标转码；公共网络共享进程级长寿命 Tokio runtime，async 与 blocking worker 均按设备可用并行度自适应，transport 只持 handle，取消不会在析构阶段等待仍执行的系统 DNS；`library_search` 与 `library_download` 可携带 `operationId` 并协作取消。公共会话与管理 Cookie 隔离，`library_fetch_asset` 只访问受信图标源并固定返回严格 `{"mediaType":"image/png","bytesBase64":"..."}`，输出和远端错误不泄露访问码或 Cookie |
 | 自定义软件库生成器 | 已实现 | 窄屏 `NavigationBar` 与宽屏 `NavigationRail` 提供一级“软件库”入口，创建零伪造来源的空白新项目；文件夹菜单继续以当前分享信息创建项目。两种入口共用同一真实编辑、保存与离线打包页，配置身份、品牌、图标、公开软件源、功能开关和目标平台 |
 | Android / Windows 离线模板重打包 | 已实现 | `library_repackage_android/windows` 只修改预构建 APK 或 Windows x64 便携 ZIP；Android 版 LanzouYOU 同样可以生成 Windows ZIP，不在设备上编译 Flutter/Rust 源码 |
 

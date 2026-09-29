@@ -11,6 +11,7 @@ void main() {
   testWidgets(
     'membership entry opens a native page before any external launch',
     (tester) async {
+      await _resetAccountHarness(tester);
       Uri? launched;
       final controller = await _signedInController();
       addTearDown(controller.dispose);
@@ -221,6 +222,7 @@ void main() {
   testWidgets(
     'narrow high-scale master pushes a scrollable native detail without overflow',
     (tester) async {
+      await _resetAccountHarness(tester);
       tester.view.devicePixelRatio = 1;
       tester.view.physicalSize = const Size(320, 640);
       tester.platformDispatcher.textScaleFactorTestValue = 2;
@@ -279,6 +281,7 @@ void main() {
   });
 
   testWidgets('capability load error has retry', (tester) async {
+    await _resetAccountHarness(tester);
     final cloud = FakeCloudService()
       ..accountCapabilitiesFailure = const CloudFailure(
         'temporary_failure',
@@ -389,6 +392,19 @@ void main() {
     expect(find.text('已阻止非蓝奏云官方页面'), findsOneWidget);
     expect(find.byKey(const Key('official-portal-confirmation')), findsNothing);
     expect(launched, isNull);
+  });
+}
+
+Future<void> _resetAccountHarness(WidgetTester tester) async {
+  await tester.pumpWidget(const SizedBox.shrink());
+  await tester.pump(const Duration(milliseconds: 20));
+  tester.view.devicePixelRatio = 1;
+  addTearDown(() async {
+    await tester.pumpWidget(const SizedBox.shrink());
+    await tester.pump(const Duration(milliseconds: 20));
+    tester.view.resetDevicePixelRatio();
+    tester.view.resetPhysicalSize();
+    tester.platformDispatcher.clearTextScaleFactorTestValue();
   });
 }
 

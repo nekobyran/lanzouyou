@@ -70,12 +70,15 @@ class AppController extends ChangeNotifier {
   String? packageReplaceMessage;
   SessionInfo? currentSession;
   String? sessionInfoError;
+  final List<StoredSessionAccount> _accounts = <StoredSessionAccount>[];
+  String? activeAccountId;
   AccountCapabilities? currentAccountCapabilities;
   String? accountCapabilitiesError;
   int _page = 1;
   int _requestSerial = 0;
   int _accountCapabilitiesSerial = 0;
   int _settingsRevision = 0;
+  bool _disposed = false;
   Future<void> _settingsWriteTail = Future<void>.value();
   String searchQuery = '';
 
@@ -88,7 +91,34 @@ class AppController extends ChangeNotifier {
   String get currentFolderId => crumbs.last.id;
   String get currentFolderName => crumbs.last.name;
   bool get selectionMode => selectedIds.isNotEmpty;
+
+  @override
+  void notifyListeners() {
+    if (_disposed) return;
+    super.notifyListeners();
+  }
+
+  @override
+  void dispose() {
+    _disposed = true;
+    _requestSerial++;
+    _accountCapabilitiesSerial++;
+    super.dispose();
+  }
+
   List<CloudItem> get items => List.unmodifiable(_items);
+  List<StoredSessionAccount> get accounts => List.unmodifiable(_accounts);
+  StoredSessionAccount? get activeAccount {
+    final id = activeAccountId;
+    if (id == null) return null;
+    for (final account in _accounts) {
+      if (account.id == id) return account;
+    }
+    return null;
+  }
+
+  bool get isSignedIn => sessionStatus == SessionStatus.signedIn;
+
   List<CloudItem> get visibleItems {
     final query = searchQuery.trim().toLowerCase();
     if (query.isEmpty) return items;
@@ -101,35 +131,50 @@ class AppController extends ChangeNotifier {
     sessionStatus = SessionStatus.restoring;
     sessionError = null;
     notifyListeners();
-    final settings = await settingsStore.read();
-    themeMode = settings.themeMode;
-    reduceMotion = settings.reduceMotion;
-    linkOpenPreference = settings.linkOpenPreference;
-    showSourceLinks = settings.showSourceLinks;
-    searchViewCreationRate = settings.searchViewCreationRate;
-    settingsSaveError = null;
-    notifyListeners();
     try {
-      final cookie = await sessionStore.readCookie();
-      if (cookie == null || cookie.trim().isEmpty) {
+      final settings = await settingsStore.read();
+      themeMode = settings.themeMode;
+      reduceMotion = settings.reduceMotion;
+      linkOpenPreference = settings.linkOpenPreference;
+      showSourceLinks = settings.showSourceLinks;
+      searchViewCreationRate = settings.searchViewCreationRate;
+      settingsSaveError = null;
+
+      final vault = await sessionStore.read();
+      _accounts
+        ..clear()
+        ..addAll(vault.accounts);
+      activeAccountId = vault.activeAccountId;
+      if (_accounts.isEmpty) {
+        _resetPrivateState();
         sessionStatus = SessionStatus.signedOut;
         notifyListeners();
         return;
       }
-      await cloudService.restoreSession(cookie);
-      sessionStatus = SessionStatus.signedIn;
-      notifyListeners();
-      await refreshSessionInfo();
-      if (sessionStatus != SessionStatus.signedIn) return;
-      await refreshAccountCapabilities();
-      if (sessionStatus != SessionStatus.signedIn) return;
-      await loadCurrentFolder();
-    } on CloudFailure catch (error) {
-      await sessionStore.clear();
+
+      final candidates = <StoredSessionAccount>[
+        ?activeAccount,
+        ..._accounts.where((account) => account.id != activeAccountId),
+      ];
+      String? lastError;
+      for (final account in candidates) {
+        try {
+          if (await _activateStoredAccount(account, persistSelection: true)) {
+            return;
+          }
+        } on CloudFailure catch (error) {
+          lastError = error.message;
+          _accounts.removeWhere((value) => value.id == account.id);
+          if (activeAccountId == account.id) activeAccountId = null;
+        }
+      }
+      await _persistAccountVault();
+      _resetPrivateState();
       sessionStatus = SessionStatus.signedOut;
-      sessionError = error.message;
+      sessionError = lastError;
       notifyListeners();
     } on Object {
+      _resetPrivateState();
       sessionStatus = SessionStatus.signedOut;
       sessionError = '无法读取受保护的登录状态';
       notifyListeners();
@@ -137,66 +182,184 @@ class AppController extends ChangeNotifier {
   }
 
   Future<bool> login(String account, String password) async {
-    if (account.trim().isEmpty || password.isEmpty) {
+    final displayName = account.trim();
+    if (displayName.isEmpty || password.isEmpty) {
       sessionError = '请输入账号和密码';
       notifyListeners();
       return false;
     }
+    final previous = activeAccount;
     sessionStatus = SessionStatus.authenticating;
     sessionError = null;
     notifyListeners();
     try {
-      final result = await cloudService.login(account.trim(), password);
-      await sessionStore.writeCookie(result.cookie);
+      final result = await cloudService.login(displayName, password);
+      final id = displayName.toLowerCase();
+      final saved = StoredSessionAccount(
+        id: id,
+        displayName: displayName,
+        cookie: result.cookie,
+      );
+      final index = _accounts.indexWhere(
+        (value) => value.id.toLowerCase() == id,
+      );
+      if (index < 0) {
+        _accounts.add(saved);
+      } else {
+        _accounts[index] = saved;
+      }
+      activeAccountId = saved.id;
+      await _persistAccountVault();
+      currentSession = await cloudService.sessionInfo();
+      if (currentSession?.authenticated != true) {
+        throw const CloudFailure('session_expired', '登录状态无效，请重新登录');
+      }
       sessionStatus = SessionStatus.signedIn;
       notifyListeners();
-      await refreshSessionInfo();
-      if (sessionStatus != SessionStatus.signedIn) return false;
       await refreshAccountCapabilities();
-      if (sessionStatus != SessionStatus.signedIn) return false;
+      if (!isSignedIn || activeAccountId != saved.id) return false;
       await loadCurrentFolder();
-      return sessionStatus == SessionStatus.signedIn;
+      return isSignedIn && activeAccountId == saved.id;
     } on CloudFailure catch (error) {
-      sessionStatus = SessionStatus.signedOut;
       sessionError = error.message;
-      notifyListeners();
+      if (previous != null) {
+        try {
+          await _activateStoredAccount(previous, persistSelection: true);
+        } on Object {
+          _resetPrivateState();
+          sessionStatus = SessionStatus.signedOut;
+          notifyListeners();
+        }
+      } else {
+        _resetPrivateState();
+        sessionStatus = SessionStatus.signedOut;
+        notifyListeners();
+      }
       return false;
     } on Object {
-      sessionStatus = SessionStatus.signedOut;
       sessionError = '无法保存受保护的登录状态';
+      if (previous != null) {
+        try {
+          await _activateStoredAccount(previous, persistSelection: true);
+        } on Object {
+          _resetPrivateState();
+          sessionStatus = SessionStatus.signedOut;
+          notifyListeners();
+        }
+      } else {
+        _resetPrivateState();
+        sessionStatus = SessionStatus.signedOut;
+        notifyListeners();
+      }
+      return false;
+    }
+  }
+
+  Future<bool> switchAccount(String accountId) async {
+    StoredSessionAccount? account;
+    for (final candidate in _accounts) {
+      if (candidate.id == accountId) {
+        account = candidate;
+        break;
+      }
+    }
+    if (account == null) return false;
+    final selectedAccount = account;
+    if (selectedAccount.id == activeAccountId && isSignedIn) return true;
+
+    final previous = activeAccount;
+    sessionStatus = SessionStatus.authenticating;
+    sessionError = null;
+    _resetPrivateState();
+    notifyListeners();
+    try {
+      return await _activateStoredAccount(
+        selectedAccount,
+        persistSelection: true,
+      );
+    } on CloudFailure catch (error) {
+      _accounts.removeWhere((value) => value.id == selectedAccount.id);
+      await _persistAccountVault();
+      sessionError = error.message;
+      if (previous != null && previous.id != selectedAccount.id) {
+        try {
+          return await _activateStoredAccount(previous, persistSelection: true);
+        } on Object {
+          // Fall through to guest mode after both stored sessions fail.
+        }
+      }
+      _resetPrivateState();
+      sessionStatus = SessionStatus.signedOut;
       notifyListeners();
       return false;
     }
   }
 
   Future<void> logout() async {
-    try {
-      await cloudService.logout();
-    } on Object {
-      // Local session removal is authoritative even if the remote logout fails.
+    final id = activeAccountId;
+    if (isSignedIn) {
+      try {
+        await cloudService.logout();
+      } on Object {
+        // Local account removal is authoritative even if remote logout fails.
+      }
     }
-    await sessionStore.clear();
-    _requestSerial++;
-    _accountCapabilitiesSerial++;
+    if (id != null) {
+      _accounts.removeWhere((account) => account.id == id);
+    }
+    activeAccountId = null;
+    await _persistAccountVault();
+    _resetPrivateState();
+    final fallback = _accounts.isEmpty ? null : _accounts.first;
+    if (fallback != null) {
+      try {
+        if (await _activateStoredAccount(fallback, persistSelection: true)) {
+          return;
+        }
+      } on Object {
+        _accounts.removeWhere((account) => account.id == fallback.id);
+        await _persistAccountVault();
+      }
+    }
     sessionStatus = SessionStatus.signedOut;
-    fileStatus = FileLoadStatus.idle;
     sessionError = null;
-    currentSession = null;
-    sessionInfoError = null;
-    currentAccountCapabilities = null;
-    accountCapabilitiesError = null;
-    accountCapabilitiesLoading = false;
-    fileError = null;
-    _items.clear();
-    crumbs
-      ..clear()
-      ..add(const FolderCrumb('-1', '全部文件'));
-    searchQuery = '';
-    clearSelection(notify: false);
+    notifyListeners();
+  }
+
+  Future<void> logoutAll() async {
+    if (isSignedIn) {
+      try {
+        await cloudService.logout();
+      } on Object {
+        // Local vault removal remains authoritative.
+      }
+    }
+    _accounts.clear();
+    activeAccountId = null;
+    await sessionStore.clear();
+    _resetPrivateState();
+    sessionStatus = SessionStatus.signedOut;
+    sessionError = null;
+    notifyListeners();
+  }
+
+  Future<void> removeAccount(String accountId) async {
+    if (accountId == activeAccountId) {
+      await logout();
+      return;
+    }
+    _accounts.removeWhere((account) => account.id == accountId);
+    await _persistAccountVault();
     notifyListeners();
   }
 
   Future<void> loadCurrentFolder({bool refresh = false}) async {
+    if (!isSignedIn) {
+      _resetPrivateState();
+      fileStatus = FileLoadStatus.idle;
+      notifyListeners();
+      return;
+    }
     final serial = ++_requestSerial;
     if (!refresh || _items.isEmpty) {
       fileStatus = FileLoadStatus.loading;
@@ -644,13 +807,59 @@ class AppController extends ChangeNotifier {
     }
   }
 
-  Future<void> _expireSession(String message) async {
-    await sessionStore.clear();
+  Future<bool> _activateStoredAccount(
+    StoredSessionAccount account, {
+    required bool persistSelection,
+  }) async {
+    _resetPrivateState();
+    activeAccountId = account.id;
+    await cloudService.restoreSession(account.cookie);
+    final info = await cloudService.sessionInfo();
+    if (!info.authenticated) {
+      throw const CloudFailure('session_expired', '登录状态已失效，请重新登录');
+    }
+    currentSession = info;
+
+    if (account.displayName == '已保存账号' &&
+        info.userId?.trim().isNotEmpty == true) {
+      final index = _accounts.indexWhere((value) => value.id == account.id);
+      if (index >= 0) {
+        _accounts[index] = account.copyWith(displayName: info.userId!.trim());
+        account = _accounts[index];
+      }
+    }
+
+    activeAccountId = account.id;
+    sessionStatus = SessionStatus.signedIn;
+    sessionError = null;
+    if (persistSelection) await _persistAccountVault();
+    notifyListeners();
+
+    await refreshAccountCapabilities();
+    if (!isSignedIn || activeAccountId != account.id) return false;
+    await loadCurrentFolder();
+    return isSignedIn && activeAccountId == account.id;
+  }
+
+  Future<void> _persistAccountVault() {
+    return sessionStore.write(
+      StoredSessionVault(
+        accounts: List<StoredSessionAccount>.unmodifiable(_accounts),
+        activeAccountId: activeAccountId,
+      ),
+    );
+  }
+
+  void _resetPrivateState() {
+    _requestSerial++;
     _accountCapabilitiesSerial++;
-    sessionStatus = SessionStatus.signedOut;
-    sessionError = message;
+    fileStatus = FileLoadStatus.idle;
+    fileError = null;
+    loadingMore = false;
+    hasMore = false;
     currentSession = null;
     sessionInfoError = null;
+    sessionInfoLoading = false;
     currentAccountCapabilities = null;
     accountCapabilitiesError = null;
     accountCapabilitiesLoading = false;
@@ -659,8 +868,33 @@ class AppController extends ChangeNotifier {
       ..clear()
       ..add(const FolderCrumb('-1', '全部文件'));
     searchQuery = '';
-    fileStatus = FileLoadStatus.idle;
     clearSelection(notify: false);
+  }
+
+  Future<void> _expireSession(String message) async {
+    final expiredId = activeAccountId;
+    if (expiredId != null) {
+      _accounts.removeWhere((account) => account.id == expiredId);
+    }
+    activeAccountId = null;
+    _resetPrivateState();
+    await _persistAccountVault();
+
+    for (final fallback in List<StoredSessionAccount>.of(_accounts)) {
+      try {
+        if (await _activateStoredAccount(fallback, persistSelection: true)) {
+          sessionError = message;
+          notifyListeners();
+          return;
+        }
+      } on Object {
+        _accounts.removeWhere((account) => account.id == fallback.id);
+        activeAccountId = null;
+      }
+    }
+    await _persistAccountVault();
+    sessionStatus = SessionStatus.signedOut;
+    sessionError = message;
     notifyListeners();
   }
 

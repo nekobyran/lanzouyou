@@ -40,6 +40,9 @@ class FakeCore:
         self.ambiguous_file_description_once = False
         self.ambiguous_icon_once = False
         self.fail_download_id: str | None = None
+        self.transient_list_errors: list[str] = []
+        self.transient_restore_errors: list[str] = []
+        self.transient_download_errors: dict[str, list[str]] = {}
 
     @staticmethod
     def _folder(identifier: str, name: str) -> dict[str, object]:
@@ -111,7 +114,13 @@ class FakeCore:
         operation = command.get("op")
         if operation == "login":
             return {"cookie": "fake-cookie-must-never-be-printed", "authenticated": True}
+        if operation == "restore_session":
+            if self.transient_restore_errors:
+                raise tool.PublishError(self.transient_restore_errors.pop(0))
+            return {"authenticated": True}
         if operation == "list":
+            if self.transient_list_errors:
+                raise tool.PublishError(self.transient_list_errors.pop(0))
             folder_id = command.get("folderId")
             if folder_id == tool.ROOT_ID:
                 items = [dict(item) for item in self.root]
@@ -155,6 +164,10 @@ class FakeCore:
             item = self._find_active(command.get("id"))
             destination = Path(str(command["destination"]))
             destination.parent.mkdir(parents=True, exist_ok=True)
+            transient = self.transient_download_errors.get(str(item["id"]))
+            if transient:
+                destination.write_bytes(b"partial-transient-readback")
+                raise tool.PublishError(transient.pop(0))
             if str(item["id"]) == self.fail_download_id:
                 destination.write_bytes(b"partial-readback")
                 raise tool.PublishError("injected_download_failure")
@@ -348,6 +361,8 @@ class DelayedDeleteFakeCore(FakeCore):
 
         result = super().call(command)
         if operation == "list":
+            if self.transient_list_errors:
+                raise tool.PublishError(self.transient_list_errors.pop(0))
             folder_id = command.get("folderId")
             for ghost in self._listing_ghosts.values():
                 item = ghost["item"]
@@ -1018,6 +1033,25 @@ class PublishLanzouMaxTests(unittest.TestCase):
         operations = {str(call["op"]) for call in fake.calls}
         self.assertEqual(operations, {"login", "list"})
 
+    def test_restore_session_retries_observed_transient_core_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            fake = FakeCore()
+            fake.transient_restore_errors = [
+                "core_parse_error",
+                "core_timeout",
+                "core_network_error",
+                "core_ambiguous_result",
+            ]
+            publisher = self.publisher(fake, self.make_apk(root))
+
+            with mock.patch.object(tool.time, "sleep") as sleep:
+                publisher.restore_session("fake-session-cookie")
+
+            self.assertEqual(sleep.call_count, 4)
+            restores = [call for call in fake.calls if call.get("op") == "restore_session"]
+            self.assertEqual(len(restores), 5)
+
     def test_verify_readback_downloads_both_exact_final_files_and_cleans_temp(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
@@ -1051,6 +1085,78 @@ class PublishLanzouMaxTests(unittest.TestCase):
             operations = [str(call["op"]) for call in fake.calls]
             self.assertEqual(operations.count("download"), 2)
             self.assertEqual(set(operations), {"login", "list", "download"})
+
+    def test_verify_readback_retries_observed_transient_list_errors(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            fake = FakeCore()
+            apk = self.make_apk(root)
+            payload = apk.read_bytes()
+            for parent, identifier in (
+                (fake.primary_id, "primary-final"),
+                (fake.library_id, "library-final"),
+            ):
+                fake.add_file(
+                    parent,
+                    tool.final_apk_name(self.VERSION),
+                    identifier=identifier,
+                    content=payload,
+                )
+            fake.transient_list_errors = [
+                "core_parse_error",
+                "core_timeout",
+                "core_network_error",
+                "core_ambiguous_result",
+            ]
+            readback_root = root / "readback"
+            readback_root.mkdir()
+            publisher = self.publisher(fake, apk)
+            publisher.authenticate("fake-user", "fake-password")
+
+            with mock.patch.object(tool.time, "sleep") as sleep:
+                summary = publisher.verify_readback(readback_root)
+
+            self.assertEqual(summary.verified_count, 2)
+            self.assertEqual(sleep.call_count, 4)
+            self.assertEqual(list(readback_root.iterdir()), [])
+
+    def test_verify_readback_retries_transient_download_and_removes_partial_file(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            fake = FakeCore()
+            apk = self.make_apk(root)
+            payload = apk.read_bytes()
+            fake.add_file(
+                fake.primary_id,
+                tool.final_apk_name(self.VERSION),
+                identifier="primary-final",
+                content=payload,
+            )
+            fake.add_file(
+                fake.library_id,
+                tool.final_apk_name(self.VERSION),
+                identifier="library-final",
+                content=payload,
+            )
+            fake.transient_download_errors["library-final"] = [
+                "core_network_error",
+                "core_timeout",
+                "core_parse_error",
+                "core_ambiguous_result",
+            ]
+            readback_root = root / "readback"
+            readback_root.mkdir()
+            publisher = self.publisher(fake, apk)
+            publisher.authenticate("fake-user", "fake-password")
+
+            with mock.patch.object(tool.time, "sleep") as sleep:
+                summary = publisher.verify_readback(readback_root)
+
+            self.assertEqual(summary.verified_count, 2)
+            self.assertEqual(sleep.call_count, 4)
+            self.assertEqual(list(readback_root.iterdir()), [])
+            downloads = [call for call in fake.calls if call.get("op") == "download"]
+            self.assertEqual(len(downloads), 6)
 
     def test_verify_readback_rejects_hash_mismatch_and_cleans_temp(self) -> None:
         with tempfile.TemporaryDirectory() as temp:

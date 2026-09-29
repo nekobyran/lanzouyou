@@ -3,9 +3,14 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:lanzouyou/shared/app_motion.dart';
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
   testWidgets('user and platform reduced-motion preferences zero durations', (
     tester,
   ) async {
+    addTearDown(() async {
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump(const Duration(milliseconds: 20));
+    });
     Duration? fast;
     Duration? medium;
     Duration? slow;
@@ -48,6 +53,10 @@ void main() {
   testWidgets(
     'page transition preserves state and excludes inactive semantics',
     (tester) async {
+      addTearDown(() async {
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump(const Duration(milliseconds: 20));
+      });
       final firstKey = GlobalKey<_CounterPageState>();
 
       Widget subject(int index) => MaterialApp(

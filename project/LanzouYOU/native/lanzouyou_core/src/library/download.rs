@@ -2,6 +2,7 @@ use std::{
     fs::{self},
     path::{Path, PathBuf},
     sync::Arc,
+    time::Duration,
 };
 
 use crate::{
@@ -11,10 +12,14 @@ use crate::{
 };
 
 use super::{
-    direct_link::{self, DirectLinkLease, ResolvePriority, ResolvedDirectLink},
+    direct_link::{self, DirectLinkLease, ResolvedDirectLink},
     model::LibraryDownloadResult,
     resolve,
-    transfer::{RangeRequest, TransferMetadata, TransferPaths},
+    session::wait_cooperatively,
+    transfer::{
+        process_transfers, RangeRequest, TransferControl, TransferMetadata, TransferPaths,
+        TransferState, WorkerDirective, WorkerLease,
+    },
     url::{normalize_public_share_url, SecurityPolicy},
 };
 
@@ -33,19 +38,29 @@ pub(crate) fn download(
     }
     let directory = validate_destination_directory(destination_directory)?;
     let canonical_share_url = normalize_public_share_url(share_url, &policy)?;
-    let mut lease = resolve_cached(
+    let mut transfer = begin_transfer(operation)?;
+
+    let mut lease = match resolve_cached(
         source_id,
         &canonical_share_url,
         password,
         &policy,
         exchange_delays,
         operation,
-    )?;
+    ) {
+        Ok(lease) => lease,
+        Err(error) => {
+            finish_transfer_error(&transfer, &error, 0);
+            return Err(error);
+        }
+    };
     validation::safe_filename(lease.file_name())?;
     let file_name = lease.file_name().to_owned();
     let final_path = directory.join(&file_name);
     if final_path.exists() {
-        return Err(already_exists());
+        let error = already_exists();
+        finish_transfer_error(&transfer, &error, 0);
+        return Err(error);
     }
     let paths =
         TransferPaths::for_identity(&directory, source_id, &canonical_share_url, &file_name)?;
@@ -55,11 +70,26 @@ pub(crate) fn download(
         paths.write_metadata_atomic(&metadata)?;
     }
 
+    if let Some((control, worker)) = transfer.as_mut() {
+        match activate_transfer(control, *worker, operation, metadata.committed_bytes) {
+            Ok(next) => *worker = next,
+            Err(error) => {
+                finish_transfer_error(&transfer, &error, metadata.committed_bytes);
+                if error.code == "cancelled" {
+                    drop(part_file);
+                    cleanup_cancelled_transfer(&paths)?;
+                }
+                return Err(error);
+            }
+        }
+    }
+
     let mut refreshed_direct = false;
     let mut completed = false;
     for _ in 0..128 {
         if let Some(operation) = operation {
             if let Err(error) = operation.check_cancelled() {
+                finish_transfer_error(&transfer, &error, metadata.committed_bytes);
                 drop(part_file);
                 cleanup_cancelled_transfer(&paths)?;
                 return Err(error);
@@ -72,19 +102,24 @@ pub(crate) fn download(
         let transport = lease
             .transport()
             .ok_or_else(|| CoreError::new("internal_error", "直链缓存缺少下载会话", false))?;
-        let transfer = transport.download_guarded_range_to(
+        let control = transfer
+            .as_ref()
+            .map(|(control, worker)| (control.as_ref(), *worker));
+        let result = transport.download_guarded_range_to_with_agent(
             lease.direct_url(),
             &canonical_share_url,
             &mut part_file,
             &range,
+            lease.user_agent(),
             operation,
-            None,
+            control,
         );
-        match transfer {
+        match result {
             Ok(result) => {
                 metadata.committed_bytes = result.committed_bytes;
                 metadata.set_validator(&result.validator);
                 paths.write_metadata_atomic(&metadata)?;
+                publish_transfer_progress(&transfer, result.committed_bytes, result.total_bytes);
                 if result
                     .total_bytes
                     .is_none_or(|total| result.committed_bytes == total)
@@ -93,18 +128,32 @@ pub(crate) fn download(
                     break;
                 }
                 if result.response_bytes == 0 {
-                    return Err(CoreError::new(
-                        "range_invalid",
-                        "Range 下载未取得进展",
-                        true,
-                    ));
+                    let error = CoreError::new("range_invalid", "Range 下载未取得进展", true);
+                    finish_transfer_error(&transfer, &error, metadata.committed_bytes);
+                    return Err(error);
                 }
             }
             Err(error) => {
                 part_file.sync_all()?;
                 metadata.committed_bytes = part_file.metadata()?.len();
                 paths.write_metadata_atomic(&metadata)?;
+
+                if error.code == "transfer_paused" {
+                    if let Some((control, worker)) = transfer.as_mut() {
+                        if control.acknowledge_paused(*worker, metadata.committed_bytes)? {}
+                        let resumed = wait_for_resume(control, operation)?;
+                        *worker = activate_transfer(
+                            control,
+                            resumed,
+                            operation,
+                            metadata.committed_bytes,
+                        )?;
+                        continue;
+                    }
+                }
+
                 if error.code == "cancelled" {
+                    finish_transfer_error(&transfer, &error, metadata.committed_bytes);
                     drop(part_file);
                     cleanup_cancelled_transfer(&paths)?;
                     return Err(error);
@@ -120,6 +169,7 @@ pub(crate) fn download(
                         part_file.set_len(0)?;
                         metadata = TransferMetadata::new(file_name.clone(), 0, 0);
                         paths.write_metadata_atomic(&metadata)?;
+                        publish_transfer_progress(&transfer, 0, None);
                     }
                     lease = match resolve_cached(
                         source_id,
@@ -130,36 +180,40 @@ pub(crate) fn download(
                         operation,
                     ) {
                         Ok(lease) => lease,
-                        Err(error) if error.code == "cancelled" => {
-                            drop(part_file);
-                            cleanup_cancelled_transfer(&paths)?;
+                        Err(error) => {
+                            finish_transfer_error(&transfer, &error, metadata.committed_bytes);
+                            if error.code == "cancelled" {
+                                drop(part_file);
+                                cleanup_cancelled_transfer(&paths)?;
+                            }
                             return Err(error);
                         }
-                        Err(error) => return Err(error),
                     };
                     if lease.file_name() != file_name {
-                        return Err(CoreError::new(
+                        let error = CoreError::new(
                             "entity_changed",
                             "刷新直链后文件名发生变化，请重新开始下载",
                             true,
-                        ));
+                        );
+                        finish_transfer_error(&transfer, &error, metadata.committed_bytes);
+                        return Err(error);
                     }
                     continue;
                 }
+                finish_transfer_error(&transfer, &error, metadata.committed_bytes);
                 return Err(error);
             }
         }
     }
     if !completed {
-        return Err(CoreError::new(
-            "range_invalid",
-            "Range 分段次数超过安全上限",
-            true,
-        ));
+        let error = CoreError::new("range_invalid", "Range 分段次数超过安全上限", true);
+        finish_transfer_error(&transfer, &error, metadata.committed_bytes);
+        return Err(error);
     }
 
     if let Some(operation) = operation {
         if let Err(error) = operation.check_cancelled() {
+            finish_transfer_error(&transfer, &error, metadata.committed_bytes);
             drop(part_file);
             cleanup_cancelled_transfer(&paths)?;
             return Err(error);
@@ -173,6 +227,7 @@ pub(crate) fn download(
     if let Some(operation) = operation {
         operation.complete_unit(0);
     }
+    finish_transfer_success(&transfer, metadata.committed_bytes);
     let path = final_path
         .to_str()
         .ok_or_else(|| CoreError::invalid("下载目录必须是有效的 UTF-8 路径"))?
@@ -182,6 +237,144 @@ pub(crate) fn download(
         file_name,
         bytes_written: metadata.committed_bytes,
     })
+}
+
+type ActiveTransfer = Option<(Arc<TransferControl>, WorkerLease)>;
+
+fn begin_transfer(operation: Option<&OperationHandle>) -> CoreResult<ActiveTransfer> {
+    let Some(operation) = operation else {
+        return Ok(None);
+    };
+    let control = process_transfers().start(operation.operation_id())?;
+    let worker = control.begin_resolution()?;
+
+    Ok(Some((control, worker)))
+}
+
+fn activate_transfer(
+    control: &TransferControl,
+    mut worker: WorkerLease,
+    operation: Option<&OperationHandle>,
+    committed_bytes: u64,
+) -> CoreResult<WorkerLease> {
+    loop {
+        if let Some(operation) = operation {
+            operation.check_cancelled()?;
+        }
+        match control.directive(worker) {
+            WorkerDirective::Continue => {
+                if control.begin_downloading(worker)? {
+                    return Ok(worker);
+                }
+                match control.status().state {
+                    TransferState::Downloading => return Ok(worker),
+                    TransferState::Queued => {
+                        worker = control.begin_resolution()?;
+                    }
+                    TransferState::Pausing | TransferState::Paused => {
+                        if control.status().state == TransferState::Pausing
+                            && control.acknowledge_paused(worker, committed_bytes)?
+                        {
+                        }
+                        worker = wait_for_resume(control, operation)?;
+                    }
+                    TransferState::Cancelling | TransferState::Cancelled => {
+                        return Err(CoreError::cancelled());
+                    }
+                    TransferState::Succeeded | TransferState::Failed => {
+                        return Err(CoreError::new(
+                            "transfer_state",
+                            "下载任务已进入终态",
+                            false,
+                        ));
+                    }
+                    TransferState::Resolving => {}
+                }
+            }
+            WorkerDirective::Pause => {
+                if control.acknowledge_paused(worker, committed_bytes)? {}
+                worker = wait_for_resume(control, operation)?;
+            }
+            WorkerDirective::Cancel => {
+                if control.acknowledge_cancelled(worker, committed_bytes)? {}
+                return Err(CoreError::cancelled());
+            }
+            WorkerDirective::Stale => {
+                worker = wait_for_resume(control, operation)?;
+            }
+        }
+    }
+}
+
+fn wait_for_resume(
+    control: &TransferControl,
+    operation: Option<&OperationHandle>,
+) -> CoreResult<WorkerLease> {
+    loop {
+        if let Some(operation) = operation {
+            operation.check_cancelled()?;
+        }
+        match control.status().state {
+            TransferState::Queued => {
+                let worker = control.begin_resolution()?;
+
+                return Ok(worker);
+            }
+            TransferState::Pausing | TransferState::Paused => {
+                wait_cooperatively(Duration::from_millis(25), operation, None)?;
+            }
+            TransferState::Cancelling | TransferState::Cancelled => {
+                return Err(CoreError::cancelled());
+            }
+            TransferState::Succeeded | TransferState::Failed => {
+                return Err(CoreError::new(
+                    "transfer_state",
+                    "下载任务已进入终态",
+                    false,
+                ));
+            }
+            TransferState::Resolving | TransferState::Downloading => {
+                return Err(CoreError::new(
+                    "transfer_state",
+                    "下载任务恢复状态与当前工作线程不一致",
+                    false,
+                ));
+            }
+        }
+    }
+}
+
+fn publish_transfer_progress(
+    transfer: &ActiveTransfer,
+    committed_bytes: u64,
+    total_bytes: Option<u64>,
+) {
+    if let Some((control, worker)) = transfer {
+        if control.publish_progress(*worker, committed_bytes, total_bytes) {}
+    }
+}
+
+fn finish_transfer_success(transfer: &ActiveTransfer, committed_bytes: u64) {
+    if let Some((control, worker)) = transfer {
+        if control.finish_success(*worker, committed_bytes) {}
+    }
+}
+
+fn finish_transfer_error(transfer: &ActiveTransfer, error: &CoreError, committed_bytes: u64) {
+    let Some((control, worker)) = transfer else {
+        return;
+    };
+    if error.code == "cancelled" {
+        let status = control.request_cancel();
+
+        if status.state == TransferState::Cancelling
+            && control
+                .acknowledge_cancelled(*worker, committed_bytes)
+                .unwrap_or(false)
+        {}
+        return;
+    }
+    if control.finish_failure(*worker, error.code) {}
 }
 
 fn cleanup_cancelled_transfer(paths: &TransferPaths) -> CoreResult<()> {
@@ -203,27 +396,22 @@ fn resolve_cached(
     exchange_delays: resolve::DirectExchangeDelays,
     operation: Option<&OperationHandle>,
 ) -> CoreResult<DirectLinkLease> {
-    direct_link::process_cache().resolve(
-        canonical_share_url,
-        password,
-        policy,
-        ResolvePriority::Confirmed,
-        |share_url, _context| {
-            let (transport, resolved) = resolve::resolve_with_transport(
-                source_id,
-                share_url,
-                password,
-                policy.clone(),
-                exchange_delays,
-                operation,
-            )?;
-            ResolvedDirectLink::with_transport(
-                resolved.url,
-                resolved.file_name,
-                Arc::new(transport),
-            )
-        },
-    )
+    direct_link::process_cache().resolve(canonical_share_url, password, policy, |share_url| {
+        let (transport, resolved, agent) = resolve::resolve_with_transport(
+            source_id,
+            share_url,
+            password,
+            policy.clone(),
+            exchange_delays,
+            operation,
+        )?;
+        ResolvedDirectLink::with_transport_and_agent(
+            resolved.url,
+            resolved.file_name,
+            Arc::new(transport),
+            agent,
+        )
+    })
 }
 
 fn validate_destination_directory(value: &str) -> CoreResult<PathBuf> {
@@ -493,19 +681,14 @@ mod tests {
         let transport =
             Arc::new(super::super::session::LibraryTransport::for_test(origin.clone()).unwrap());
         direct_link::process_cache()
-            .resolve(
-                &share_url,
-                "",
-                &policy,
-                ResolvePriority::Confirmed,
-                |_, _| {
-                    ResolvedDirectLink::with_transport(
-                        format!("{origin}/cancel.apk"),
-                        "cancel.apk".to_owned(),
-                        transport,
-                    )
-                },
-            )
+            .resolve(&share_url, "", &policy, |_| {
+                ResolvedDirectLink::with_transport_and_agent(
+                    format!("{origin}/cancel.apk"),
+                    "cancel.apk".to_owned(),
+                    transport,
+                    super::super::network_profile::UserAgentProfile::MobileChrome,
+                )
+            })
             .unwrap();
         let directory = tempfile::tempdir().unwrap();
         let destination = directory.path().to_string_lossy().into_owned();
@@ -569,19 +752,14 @@ mod tests {
         let transport =
             Arc::new(super::super::session::LibraryTransport::for_test(origin.clone()).unwrap());
         direct_link::process_cache()
-            .resolve(
-                &share_url,
-                "",
-                &policy,
-                ResolvePriority::Confirmed,
-                |_, _| {
-                    ResolvedDirectLink::with_transport(
-                        format!("{origin}/file/resume.apk"),
-                        "resume.apk".to_owned(),
-                        transport,
-                    )
-                },
-            )
+            .resolve(&share_url, "", &policy, |_| {
+                ResolvedDirectLink::with_transport_and_agent(
+                    format!("{origin}/file/resume.apk"),
+                    "resume.apk".to_owned(),
+                    transport,
+                    super::super::network_profile::UserAgentProfile::MobileChrome,
+                )
+            })
             .unwrap();
         let directory = tempfile::tempdir().unwrap();
         let canonical = normalize_public_share_url(&share_url, &policy).unwrap();
@@ -673,19 +851,14 @@ mod tests {
         let transport =
             Arc::new(super::super::session::LibraryTransport::for_test(origin.clone()).unwrap());
         direct_link::process_cache()
-            .resolve(
-                &share_url,
-                "",
-                &policy,
-                ResolvePriority::Confirmed,
-                |_, _| {
-                    ResolvedDirectLink::with_transport(
-                        format!("{origin}/stale"),
-                        "fresh.apk".to_owned(),
-                        transport,
-                    )
-                },
-            )
+            .resolve(&share_url, "", &policy, |_| {
+                ResolvedDirectLink::with_transport_and_agent(
+                    format!("{origin}/stale"),
+                    "fresh.apk".to_owned(),
+                    transport,
+                    super::super::network_profile::UserAgentProfile::MobileChrome,
+                )
+            })
             .unwrap();
         let directory = tempfile::tempdir().unwrap();
 

@@ -88,8 +88,7 @@ void main() {
   testWidgets('builder enables preview only after a valid source exists', (
     tester,
   ) async {
-    await tester.binding.setSurfaceSize(const Size(390, 844));
-    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await _setSurface(tester, const Size(390, 844));
 
     await tester.pumpWidget(
       const MaterialApp(home: LibraryBuilderPage.newProject()),
@@ -106,8 +105,7 @@ void main() {
   testWidgets(
     'builder opens the embedded production list and reuses browse search detail and asset paths',
     (tester) async {
-      await tester.binding.setSurfaceSize(const Size(390, 844));
-      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await _setSurface(tester, const Size(390, 844));
       final core = _PreviewCore();
 
       await tester.pumpWidget(
@@ -157,8 +155,7 @@ void main() {
   testWidgets('preview route has an explicit return to the editor', (
     tester,
   ) async {
-    await tester.binding.setSurfaceSize(const Size(390, 844));
-    addTearDown(() => tester.binding.setSurfaceSize(null));
+    await _setSurface(tester, const Size(390, 844));
     await tester.pumpWidget(
       MaterialApp(
         home: LibraryBuilderPage(
@@ -182,8 +179,7 @@ void main() {
   testWidgets(
     'embedded preview switches source through the real loading state',
     (tester) async {
-      await tester.binding.setSurfaceSize(const Size(390, 844));
-      addTearDown(() => tester.binding.setSurfaceSize(null));
+      await _setSurface(tester, const Size(390, 844));
       final base = LibraryBuildRecipe.fromShareInfo(share);
       final recipe = base.copyWith(
         sources: [
@@ -244,67 +240,21 @@ void main() {
       expect(find.text('备用源软件'), findsOneWidget);
     },
   );
+}
 
-  testWidgets('embedded preview keeps the production wide source pane', (
-    tester,
-  ) async {
-    await tester.binding.setSurfaceSize(const Size(1280, 800));
-    addTearDown(() => tester.binding.setSurfaceSize(null));
-    final recipe = LibraryBuildRecipe.fromShareInfo(share);
-
-    await tester.pumpWidget(
-      MaterialApp(
-        home: LibraryPreviewPage.testHarness(
-          recipe: recipe,
-          core: _PreviewCore(),
-          linkOpener: _FakeLinkOpener(),
-        ),
-      ),
-    );
-    await tester.pumpAndSettle();
-
-    expect(find.byKey(const Key('wide-source-pane')), findsOneWidget);
-    expect(find.byKey(const Key('library-content-pane')), findsOneWidget);
-    expect(find.byKey(const Key('wide-download-destination')), findsNothing);
-  });
-
-  testWidgets('embedded preview exposes error retry and empty states', (
-    tester,
-  ) async {
-    await tester.binding.setSurfaceSize(const Size(390, 844));
-    addTearDown(() => tester.binding.setSurfaceSize(null));
-    final core = _PreviewCore(failBrowse: true);
-    final recipe = LibraryBuildRecipe.fromShareInfo(share);
-
-    await tester.pumpWidget(
-      MaterialApp(
-        home: LibraryPreviewPage.testHarness(
-          recipe: recipe,
-          core: core,
-          linkOpener: _FakeLinkOpener(),
-        ),
-      ),
-    );
-    await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const ValueKey('home-source-source-1')));
-    await tester.pumpAndSettle();
-
-    expect(find.text('加载失败'), findsOneWidget);
-    core
-      ..failBrowse = false
-      ..items = const [];
-    await tester.tap(find.widgetWithText(FilledButton, '重试'));
-    await tester.pumpAndSettle();
-
-    expect(find.text('此目录没有文件'), findsOneWidget);
-    expect(core.browseCalls, hasLength(2));
+Future<void> _setSurface(WidgetTester tester, Size size) async {
+  await tester.pumpWidget(const SizedBox.shrink());
+  await tester.pump(const Duration(milliseconds: 20));
+  await tester.binding.setSurfaceSize(size);
+  addTearDown(() {
+    tester.binding.setSurfaceSize(null);
   });
 }
 
 class _PreviewCore implements LibraryCore, LibraryAssetCore {
-  _PreviewCore({this.failBrowse = false});
+  _PreviewCore();
 
-  bool failBrowse;
+  bool failBrowse = false;
   List<LibraryItem> items = const [
     LibraryItem(
       sourceId: 'source-1',

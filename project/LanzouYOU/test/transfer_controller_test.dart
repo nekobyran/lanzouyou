@@ -554,6 +554,42 @@ void main() {
   );
 
   test(
+    'download pause and resume are owned by the Rust operation control',
+    () async {
+      final cloud = _SlowDownloadCloudService();
+      final controller = TransferController(
+        cloud,
+        operationPollInterval: const Duration(milliseconds: 1),
+        operationIdFactory: _testOperationId,
+      );
+      controller.enqueueDownload(
+        item: const CloudItem(
+          id: 'pause-download-file-id',
+          name: 'pause-download.apk',
+          isFolder: false,
+        ),
+        destination: r'C:\safe\pause-download.apk',
+      );
+      await cloud.downloadStarted.future;
+      final entry = controller.entries.single;
+
+      expect(controller.canPause(entry.id), isTrue);
+      expect(await controller.pause(entry.id), isTrue);
+      expect(controller.entries.single.state, TransferState.paused);
+      expect(cloud.pausedOperationIds, <String>[entry.operationId]);
+      expect(controller.canResume(entry.id), isTrue);
+
+      expect(await controller.resume(entry.id), isTrue);
+      expect(controller.entries.single.state, TransferState.running);
+      expect(cloud.resumedOperationIds, <String>[entry.operationId]);
+
+      cloud.completeDownload();
+      await _waitForTransfers(controller);
+      expect(controller.entries.single.state, TransferState.succeeded);
+    },
+  );
+
+  test(
     'accepted download cancellation that arrives too late preserves success',
     () async {
       final cloud = _SlowDownloadCloudService();
@@ -584,6 +620,49 @@ void main() {
     },
   );
 
+  test('transfer admission follows Rust-reported device capacity', () async {
+    final cloud = _AdaptiveCapacityCloudService(transferWorkers: 2);
+    final controller = TransferController(
+      cloud,
+      operationPollInterval: const Duration(milliseconds: 1),
+      operationIdFactory: _testOperationId,
+    );
+
+    controller.enqueueUploads(
+      folderId: '-1',
+      paths: const <String>['one.apk', 'two.apk', 'three.apk'],
+      onFolderChanged: () {},
+    );
+
+    await _waitUntil(() => cloud.startedOperationIds.length == 2);
+    expect(
+      controller.entries.where((entry) => entry.state == TransferState.running),
+      hasLength(2),
+    );
+    expect(
+      controller.entries.where((entry) => entry.state == TransferState.queued),
+      hasLength(1),
+    );
+
+    cloud.complete(cloud.startedOperationIds.first);
+    await _waitUntil(() => cloud.startedOperationIds.length == 3);
+    expect(
+      controller.entries.where((entry) => entry.state == TransferState.queued),
+      isEmpty,
+    );
+
+    for (final operationId in cloud.startedOperationIds.toList()) {
+      cloud.complete(operationId);
+    }
+    await _waitForTransfers(controller);
+    expect(
+      controller.entries.every(
+        (entry) => entry.state == TransferState.succeeded,
+      ),
+      isTrue,
+    );
+  });
+
   test('disposing best-effort cancels the active core operation', () async {
     final cloud = _SlowCloudService();
     final controller = TransferController(
@@ -612,6 +691,7 @@ Future<void> _waitForTransfers(TransferController controller) async {
       (entry) =>
           entry.state != TransferState.queued &&
           entry.state != TransferState.running &&
+          entry.state != TransferState.paused &&
           entry.state != TransferState.cancelling,
     )) {
       return;
@@ -632,7 +712,71 @@ Future<void> _waitUntil(bool Function() predicate) async {
 String _testOperationId(TransferKind kind, int sequence) =>
     'test-${kind.name}-$sequence';
 
-class _SlowCloudService extends FakeCloudService {
+class _AdaptiveCapacityCloudService extends FakeCloudService
+    implements CloudRuntimeCapabilitiesProvider {
+  _AdaptiveCapacityCloudService({required this.transferWorkers});
+
+  final int transferWorkers;
+  final List<String> startedOperationIds = <String>[];
+  final Map<String, Completer<UploadResult>> _pending =
+      <String, Completer<UploadResult>>{};
+
+  @override
+  Future<RuntimeCapabilities> runtimeCapabilities() async {
+    return RuntimeCapabilities(
+      logicalCpus: transferWorkers,
+      networkWorkers: transferWorkers,
+      transferWorkers: transferWorkers,
+      asyncWorkers: transferWorkers,
+      blockingWorkers: transferWorkers,
+    );
+  }
+
+  @override
+  Future<UploadResult> upload(
+    String folderId,
+    String path, {
+    bool compatibilityWrap = false,
+    String kind = 'auto',
+    String? operationId,
+  }) {
+    final id = operationId!;
+    startedOperationIds.add(id);
+    final completer = Completer<UploadResult>();
+    _pending[id] = completer;
+    return completer.future;
+  }
+
+  @override
+  Future<CloudOperationStatus> operationStatus(String operationId) async {
+    return CloudOperationStatus(
+      operationId: operationId,
+      kind: 'upload',
+      state: _pending.containsKey(operationId) ? 'running' : 'succeeded',
+      completedUnits: 0,
+      totalUnits: 1,
+      bytesTransferred: 0,
+      totalBytes: 0,
+      itemsFound: 0,
+    );
+  }
+
+  void complete(String operationId) {
+    final completer = _pending.remove(operationId);
+    if (completer == null || completer.isCompleted) return;
+    completer.complete(
+      UploadResult(
+        id: 'uploaded-$operationId',
+        folderId: '-1',
+        originalName: '$operationId.apk',
+        uploadedName: '$operationId.apk',
+      ),
+    );
+  }
+}
+
+class _SlowCloudService extends FakeCloudService
+    implements CloudRuntimeCapabilitiesProvider {
   _SlowCloudService({this.delayIconPreparation = false});
 
   final bool delayIconPreparation;
@@ -645,6 +789,17 @@ class _SlowCloudService extends FakeCloudService {
   final List<String> forgottenOperationIds = <String>[];
   int bytesTransferred = 0;
   int totalBytes = 0;
+
+  @override
+  Future<RuntimeCapabilities> runtimeCapabilities() async {
+    return const RuntimeCapabilities(
+      logicalCpus: 1,
+      networkWorkers: 1,
+      transferWorkers: 1,
+      asyncWorkers: 1,
+      blockingWorkers: 1,
+    );
+  }
 
   @override
   Future<UploadResult> upload(
@@ -736,12 +891,16 @@ class _SlowCloudService extends FakeCloudService {
   }
 }
 
-class _SlowDownloadCloudService extends FakeCloudService {
+class _SlowDownloadCloudService extends FakeCloudService
+    implements CloudOperationPauseResume {
   final Completer<void> downloadStarted = Completer<void>();
   final Completer<void> _download = Completer<void>();
   final List<String> downloadOperationIds = <String>[];
+  final List<String> pausedOperationIds = <String>[];
+  final List<String> resumedOperationIds = <String>[];
   final List<String> cancelledOperationIds = <String>[];
   final List<String> forgottenOperationIds = <String>[];
+  bool _paused = false;
 
   @override
   Future<void> download(
@@ -750,7 +909,7 @@ class _SlowDownloadCloudService extends FakeCloudService {
     String? operationId,
   }) {
     downloadOperationIds.add(operationId!);
-    downloadStarted.complete();
+    if (!downloadStarted.isCompleted) downloadStarted.complete();
     return _download.future;
   }
 
@@ -761,7 +920,41 @@ class _SlowDownloadCloudService extends FakeCloudService {
       kind: 'download',
       state: cancelledOperationIds.contains(operationId)
           ? 'cancelling'
+          : _paused
+          ? 'paused'
           : 'running',
+      completedUnits: 0,
+      totalUnits: 1,
+      bytesTransferred: 0,
+      totalBytes: 0,
+      itemsFound: 0,
+    );
+  }
+
+  @override
+  Future<CloudOperationStatus> operationPause(String operationId) async {
+    pausedOperationIds.add(operationId);
+    _paused = true;
+    return CloudOperationStatus(
+      operationId: operationId,
+      kind: 'download',
+      state: 'paused',
+      completedUnits: 0,
+      totalUnits: 1,
+      bytesTransferred: 0,
+      totalBytes: 0,
+      itemsFound: 0,
+    );
+  }
+
+  @override
+  Future<CloudOperationStatus> operationResume(String operationId) async {
+    resumedOperationIds.add(operationId);
+    _paused = false;
+    return CloudOperationStatus(
+      operationId: operationId,
+      kind: 'download',
+      state: 'running',
       completedUnits: 0,
       totalUnits: 1,
       bytesTransferred: 0,
